@@ -1,0 +1,30 @@
+MAZE MANUAL
+Goal: reach Vault (room emblem: diamond).
+Door symbols identify routes within a room; their meaning can differ elsewhere.
+A toggle reverses a switch value. Values persist when you leave a room.
+Initial location and switch values are unknown. Ask the Operator for observations.
+Door positions are not specified here. Match symbols to the visible local targets.
+
+Crescent (emblem: crescent)
+- bars door -> Workshop; always open.
+- ring door -> Garden; always open.
+
+Gallery (emblem: sun)
+- bars door -> Tower; always open.
+- plus door -> Vault; requires A on and B on.
+- ring door -> Garden; requires A on.
+
+Garden (emblem: leaf)
+- plus door -> Crescent; always open.
+- triangle door -> Gallery; requires A on.
+
+Tower (emblem: star)
+- triangle door -> Gallery; always open.
+- solid circle control toggles switch B.
+
+Vault (emblem: diamond)
+- zigzag door -> Gallery; requires A on and B on.
+
+Workshop (emblem: anvil)
+- zigzag door -> Crescent; always open.
+- striped circle control toggles switch A.

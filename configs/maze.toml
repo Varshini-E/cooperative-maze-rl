@@ -1,0 +1,27 @@
+# Working two-agent setup. Sampling only; this runner does not train weights.
+prompt_version = "v7"
+observation_mode = "maze_detail"
+operator_history = "recent2"
+max_exchanges = 32
+max_actions = 16
+timeout_seconds = 120
+price_checked = "2026-10-25"
+price_source = "https://tinker-docs.thinkingmachines.ai/tinker/models/models_and_pricing/"
+
+[expert]
+model = "Qwen/Qwen3-8B"
+renderer = "qwen3_disable_thinking"
+max_tokens = 512
+context_tokens = 32768
+temperature = 1.0
+input_usd_per_million = 0.195
+output_usd_per_million = 0.60
+
+[operator]
+model = "Qwen/Qwen3.5-9B"
+renderer = "qwen3_5_disable_thinking"
+max_tokens = 256
+context_tokens = 65536
+temperature = 0.0
+input_usd_per_million = 0.30
+output_usd_per_million = 0.807
