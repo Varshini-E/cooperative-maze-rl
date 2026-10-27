@@ -13,3 +13,7 @@ data/
 .env.*
 !.env.example
 .DS_Store
+
+# Local research archive and execution plan.
+/archive/
+/docs/thinking-fit-experiment.md

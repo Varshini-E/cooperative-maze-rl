@@ -6,6 +6,8 @@ Train a text Expert to guide a visual Operator through a maze. Test whether RL i
 
 A quick try at building an RL environment with Tinker. The idea was inspired by [GPTNT](https://gptnt.github.io/)!
 
+[What changed and what helped](CHANGELOG.md)
+
 ## Components
 
 | Component | Role |
@@ -59,10 +61,8 @@ uv sync --locked --extra models
 
 Settings live in [configs/maze.toml](configs/maze.toml). Generate a maze bank with `.venv/bin/python -m panel_guide.generate_mazes --output-dir data/mazes`.
 
-## Next steps
+## Current experiment
 
-- Expand the reviewed demonstration set and test a supervised warm start.
-- Run fresh grouped RL across varied training configurations.
-- Compare initial, supervised and RL-trained Experts on unseen starts and mazes.
+SFT, RL and inference comparisons have been run. Thinking improved sampled completion; reliable gains from RL remain unestablished. The current local experiment trains the initial Expert with thinking on two easy tasks, using groups of eight and no supervised replay.
 
-This first release includes the environment and rollout interface. Training scripts and results will follow; reliable learning gains remain unestablished.
+The public code contains the environment, rollout interface and tests. Its demo configuration is V7 with thinking disabled. Local research uses V8 with thinking enabled; training scripts and full experiment artifacts are not yet included in the public repository.
