@@ -4,25 +4,13 @@ from math import cos, pi, sin, sqrt
 
 from PIL import Image, ImageDraw, ImageFont
 
-from panel_guide.engine import MazeView, RoomView
+from panel_guide.engine import MazeView
 from panel_guide.tasks import SYMBOLS
 
 INK = "#20313e"
 BACKGROUND = "#eef2f4"
-ROOM_RENDER_VERSION = "v2-leaf"
-RENDER_VERSION = "v4-maze-min-width"
-DETAIL_RENDER_VERSION = "v5-maze-overview-detail"
+RENDER_VERSION = "v5-maze-overview-detail"  # Overview plus enlarged current-room crop.
 ROOM_SIZE, ROOM_GAP, MARGIN, TOP = 280, 88, 48, 110
-
-
-def render_version(observation_mode: str) -> str:
-    if observation_mode == "maze_detail":
-        return DETAIL_RENDER_VERSION
-    if observation_mode == "maze":
-        return RENDER_VERSION
-    if observation_mode == "room":
-        return ROOM_RENDER_VERSION
-    raise ValueError("observation_mode must be maze_detail, maze, or room.")
 
 
 def room_center(view: MazeView, position: tuple[int, int]) -> tuple[int, int]:
@@ -124,44 +112,6 @@ def draw_symbol(draw: ImageDraw.ImageDraw, symbol: str, center: tuple[float, flo
         polygon([(-1, -0.6), (1, -0.6), (0.75, -0.15), (0.3, -0.15),
                  (0.3, 0.3), (0.8, 0.7), (-0.8, 0.7), (-0.3, 0.3),
                  (-0.3, -0.15), (-0.75, -0.15)])
-
-
-def render_room(view: RoomView) -> Image.Image:
-    image = Image.new("RGB", (960, 720), BACKGROUND)
-    draw = ImageDraw.Draw(image)
-    label = ImageFont.load_default(size=24)
-    small = ImageFont.load_default(size=19)
-    draw.text((480, 30), "ROOM EMBLEM", font=small, fill=INK, anchor="mm")
-    draw_symbol(draw, view.emblem, (480, 106), 46, BACKGROUND)
-    draw.line((48, 180, 912, 180), fill="#c8d2d9", width=2)
-
-    width, gap = 232, 32
-    total = len(view.doors) * width + (len(view.doors) - 1) * gap
-    for index, door in enumerate(view.doors):
-        x = (960 - total) / 2 + index * (width + gap)
-        draw.rounded_rectangle((x, 210, x + width, 500), radius=18, fill="white", outline="#b8c6cf", width=2)
-        draw.text((x + width / 2, 238), door.id, font=label, fill=INK, anchor="mm")
-        draw_symbol(draw, door.symbol, (x + width / 2, 304), 32)
-        draw.rounded_rectangle((x + 69, 356, x + 163, 432), radius=6, fill="#e6edf1", outline=INK, width=3)
-        draw.ellipse((x + 142, 391, x + 150, 399), fill=INK)
-        color = "#17654e" if door.is_open else "#8b3a2a"
-        draw.rounded_rectangle((x + 40, 451, x + width - 40, 482), radius=8, fill=color)
-        draw.text((x + width / 2, 466), "OPEN" if door.is_open else "LOCKED", font=small, fill="white", anchor="mm")
-
-    if not view.controls:
-        draw.text((480, 610), "No controls in this room", font=label, fill="#60717c", anchor="mm")
-    total = len(view.controls) * 340 + max(0, len(view.controls) - 1) * 28
-    for index, control in enumerate(view.controls):
-        x = (960 - total) / 2 + index * 368
-        draw.rounded_rectangle((x, 540, x + 340, 686), radius=16, fill="white", outline="#b8c6cf", width=2)
-        draw_symbol(draw, control.symbol, (x + 66, 612), 32)
-        draw.text((x + 218, 572), control.id, font=label, fill=INK, anchor="mm")
-        draw.rounded_rectangle((x + 172, 600, x + 264, 630), radius=15,
-                               fill="#17654e" if control.is_on else "#778892")
-        knob_x = x + (249 if control.is_on else 187)
-        draw.ellipse((knob_x - 11, 604, knob_x + 11, 626), fill="white")
-        draw.text((x + 218, 657), "ON" if control.is_on else "OFF", font=small, fill=INK, anchor="mm")
-    return image
 
 
 def render_maze(view: MazeView) -> Image.Image:

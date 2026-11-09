@@ -113,7 +113,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completion.stop_reason, "invalid_termination")
         self.assertEqual(completion.sample["token_ids"], [4, 5, 9])
         result = await Conversation(example_task(), max_exchanges=1).run(agent, None)
-        self.assertEqual((result.status, result.reason), ("failure", "exchange_limit"))
+        self.assertEqual((result.status, result.reason), ("failure", "protocol_failure"))
 
 
 if __name__ == "__main__":

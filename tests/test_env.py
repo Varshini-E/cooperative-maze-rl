@@ -64,15 +64,13 @@ class Policy:
         return TokensWithLogprobs(tokens, [-.1 - i / 1000 for i in range(len(tokens))])
 
 def make_env(operator, *, exchanges=2, task=None, recorder=None, **kwargs):
-    conversation = Conversation(task or development_task("one-door"), prompt_version="v4",
-        observation_mode="maze_detail", operator_history="latest", max_exchanges=exchanges, max_actions=4)
+    conversation = Conversation(task or development_task("one-door"), max_exchanges=exchanges, max_actions=4)
     return MazeEnv(conversation, operator, Renderer(), recorder=recorder, **kwargs)
 
 @unittest.skipUnless(HAS_COOKBOOK, "Install optional models dependencies to test the native Env.")
 class NativeEnvTests(unittest.IsolatedAsyncioTestCase):
-    async def test_v7_recent_history_reaches_operator_through_native_env_with_expert_only_targets(self):
-        conversation = Conversation(development_task("one-door"), prompt_version="v7",
-            observation_mode="maze_detail", operator_history="recent2", max_exchanges=4)
+    async def test_recent_history_reaches_operator_through_native_env_with_expert_only_targets(self):
+        conversation = Conversation(development_task("one-door"), max_exchanges=4)
         operator = Agent(REPLY, REPLY, REPLY, ACTION)
         env = MazeEnv(conversation, operator, Renderer())
         trajectory = await do_single_rollout(Policy(ASK, ASK, ASK.replace('"ask"', '"instruct"'), MOVE), env)
@@ -91,9 +89,8 @@ class NativeEnvTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('PRIVATE MANUAL', trained)
             self.assertIn('"type":', trained)
 
-    async def test_v6_inspection_reply_reaches_next_expert_observation_through_native_env(self):
-        conversation = Conversation(development_task("one-door"), prompt_version="v6",
-                                    observation_mode="maze_detail", operator_history="latest", max_exchanges=2)
+    async def test_inspection_reply_on_instruct_reaches_next_expert_observation(self):
+        conversation = Conversation(development_task("one-door"), max_exchanges=2)
         env = MazeEnv(conversation, Agent(REPLY, ACTION), Renderer())
         mislabeled_question = ASK.replace('"ask"', '"instruct"')
         trajectory = await do_single_rollout(Policy(mislabeled_question, MOVE), env)
@@ -106,21 +103,20 @@ class NativeEnvTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_rollout_matches_conversation_requests_feedback_and_reward(self):
         direct_expert, direct_operator = Agent(ASK, MOVE), Agent(REPLY, ACTION)
-        legacy = Conversation(development_task("one-door"), prompt_version="v4", observation_mode="maze_detail",
-                              operator_history="latest", max_exchanges=2, max_actions=4)
-        expected = await legacy.run(direct_expert, direct_operator)
+        direct = Conversation(development_task("one-door"), max_exchanges=2, max_actions=4)
+        expected = await direct.run(direct_expert, direct_operator)
         native_operator = Agent(REPLY, ACTION)
         env = make_env(native_operator)
         self.assertIsInstance(env, Env)
         trajectory = await do_single_rollout(Policy(ASK, MOVE), env)
         self.assertEqual(env.conversation.result, expected)
-        self.assertEqual(env.conversation.history, legacy.history)
+        self.assertEqual(env.conversation.history, direct.history)
         for index, transition in enumerate(trajectory.transitions):
             prompt = Renderer().build_generation_prompt(direct_expert.requests[index].text_messages())
             self.assertEqual(transition.ob.to_ints(), prompt.to_ints())
             a, b = direct_operator.requests[index], native_operator.requests[index]
             self.assertEqual((a.text_messages(), a.image_png, a.detail_png), (b.text_messages(), b.image_png, b.detail_png))
-            self.assertEqual(len(b.history), 1)
+            self.assertEqual(len(b.history), (1, 4)[index])
         self.assertEqual([t.reward for t in trajectory.transitions], [0, 1])
         self.assertEqual(trajectory.stop_reason, "completed")
         self.assertTrue(trajectory.transitions[-1].episode_done)
@@ -136,7 +132,7 @@ class NativeEnvTests(unittest.IsolatedAsyncioTestCase):
         advantages = compute_advantages([group])
         self.assertEqual(advantages[0].tolist(), [.5, -.5])
         data, provenance = assemble_training_data([group], advantages)
-        self.assertEqual(len(data), 4)  # Rebuilt v4 prompts are not prefix extensions.
+        self.assertEqual(len(data), 4)  # Rebuilt prompts are not prefix extensions.
         self.assertEqual(provenance, [{'group_idx': 0, 'traj_idx': i} for i in (0, 0, 1, 1)])
         offset = 0
         for trajectory, advantage in ((success, .5), (failure, -.5)):
@@ -158,16 +154,23 @@ class NativeEnvTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(b'OPERATOR_ONLY_OBSERVATION', targets)
                 self.assertNotIn(b'PRIVATE MANUAL', targets)
 
-    async def test_truncation_invalid_json_and_satisfied_are_recoverable_zero_reward(self):
+    async def test_invalid_expert_output_ends_episode_without_operator_call(self):
+        for action, extra in ((list(MOVE.encode()) + [0], {"stop_reason": "length"}), (list(b'not JSON') + [0], None)):
+            with self.subTest(action=bytes(action)):
+                operator = Agent()
+                env = make_env(operator)
+                await env.initial_observation()
+                result = await env.step(action, extra=extra)
+                self.assertEqual((result.reward, result.episode_done), (0, True))
+                self.assertEqual(result.metrics['stop/protocol_failure'], 1)
+                self.assertFalse(operator.requests)
+
+    async def test_satisfied_is_a_recoverable_zero_reward_non_action(self):
         operator = Agent('{"type":"satisfied","text":"The plus door is already open."}', ACTION)
-        env = make_env(operator, exchanges=4)
+        env = make_env(operator)
         await env.initial_observation()
-        first = await env.step(list(MOVE.encode()) + [0], extra={"stop_reason": "length"})
-        second = await env.step(list(b'not JSON') + [0])
-        third = await env.step(list(MOVE.encode()) + [0])
-        self.assertEqual([first.reward, second.reward, third.reward], [0, 0, 0])
-        self.assertFalse(any(s.episode_done for s in (first, second, third)))
-        self.assertEqual(len(operator.requests), 1)
+        first = await env.step(list(MOVE.encode()) + [0])
+        self.assertEqual((first.reward, first.episode_done), (0, False))
         self.assertEqual(env.conversation.game.remaining_actions, 4)
         last = await env.step(list(MOVE.encode()) + [0])
         self.assertEqual((last.reward, last.episode_done), (1, True))

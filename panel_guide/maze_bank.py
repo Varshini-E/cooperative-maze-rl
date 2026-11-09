@@ -18,7 +18,11 @@ from panel_guide.solver import analyze_task
 from panel_guide.tasks import Control, Door, MazeTask, Requirement, Room, State, task_from_dict
 
 GENERATOR_VERSION = "six-room-bank-v1"
+EXTENDED_VERSION = "six-room-bank-v2"
 SPLITS = ("train", "validation_starts", "validation_mazes", "test_starts", "test_mazes")
+# v2 only: new rules/goal/switch placement on a *training* floor plan, every start held out.
+RULE_SPLITS = ("validation_rules", "test_rules")
+ALL_SPLITS = SPLITS + RULE_SPLITS
 DIFFICULTIES = {"easy": (1, 3), "medium": (4, 6), "hard": (7, 10)}
 EMBLEMS = ("crescent", "anvil", "leaf", "sun", "star", "diamond")
 DOOR_SYMBOLS = ("bars", "ring", "zigzag", "plus", "triangle")
@@ -210,6 +214,84 @@ def generate_bank(seed: int = 0, topology_counts: tuple[int, int, int] = (4, 2, 
     return manifest, records
 
 
+def extend_bank(base_manifest: dict, base_records: list[dict], seed: int = 1,
+                train_floor_plan_mazes: int = 12, heldout_floor_plan_mazes: int = 10,
+                rule_holdouts: int = 2, max_candidates: int = 20000) -> tuple[dict, list[dict]]:
+    """Superset of a v1 bank: every v1 maze and task keeps its split; new mazes are appended.
+
+    Training floor plans get `rule_holdouts` validation_rules and test_rules mazes each, the rest
+    train (3/1/1 start split as in v1). Unused floor plans join validation_mazes, so held-out
+    floor plans never appear in training. Maze identities are unique across the whole bank.
+    """
+    if base_manifest["generator_version"] != GENERATOR_VERSION:
+        raise ValueError("Extend a frozen v1 bank.")
+    rng, rejected = random.Random(seed), Counter()
+    floor_plans, partitions, existing = {}, {}, Counter()
+    for spec in base_manifest["mazes"]:
+        floor_plans.setdefault(spec["topology_id"], (spec["floor_seed"], *sample_floorplan(spec["floor_seed"])))
+        partitions.setdefault(spec["topology_id"], "train" if spec["partition"] == "train" else spec["partition"])
+        existing[spec["topology_id"]] += 1
+    for _ in range(max_candidates):
+        floor_seed = rng.getrandbits(63)
+        positions, edges = sample_floorplan(floor_seed)
+        family = digest(topology_key(edges))
+        if family not in floor_plans:
+            floor_plans[family] = (floor_seed, positions, edges)
+            partitions[family] = "validation_mazes"
+    mazes, records = list(base_manifest["mazes"]), list(base_records)
+    accepted_ids = {spec["maze_id"] for spec in mazes}
+    for family in sorted(floor_plans, key=lambda f: (("train", "validation_mazes", "test_mazes").index(partitions[f]), f)):
+        floor_seed, positions, edges = floor_plans[family]
+        target = train_floor_plan_mazes if partitions[family] == "train" else heldout_floor_plan_mazes
+        roles = ([split for split in RULE_SPLITS for _ in range(rule_holdouts)] if partitions[family] == "train" else [])
+        if target < existing[family] + len(roles):
+            raise ValueError("Targets must cover the v1 mazes plus the requested rule holdouts.")
+        roles += [partitions[family]] * (target - existing[family] - len(roles))
+        for role in roles:
+            for _ in range(max_candidates):
+                rule_seed, appearance_seed = rng.getrandbits(63), rng.getrandbits(63)
+                task = decorate(positions, edges, rule_seed, appearance_seed)
+                identity = maze_id(task)
+                if identity in accepted_ids:
+                    rejected["duplicate_maze"] += 1
+                    continue
+                episodes, reason = analyze_starts(task)
+                if reason:
+                    rejected[reason] += 1
+                    continue
+                break
+            else:
+                raise ValueError(f"Exhausted candidates for topology {family}.")
+            rooms = [room.id for room in task.rooms if room.id != task.goal]
+            rng.shuffle(rooms)
+            starts = (dict(zip(rooms, ["train"] * 3 + ["validation_starts", "test_starts"]))
+                      if role == "train" else dict.fromkeys(rooms, role))
+            mazes.append({"maze_id": identity, "topology_id": family, "partition": role, "floor_seed": floor_seed,
+                          "rule_seed": rule_seed, "appearance_seed": appearance_seed, "start_splits": starts})
+            for episode, analysis in episodes:
+                records.append({"task_id": task_id(episode), "maze_id": identity, "topology_id": family,
+                    "split": starts[episode.initial.room], "difficulty": difficulty(analysis["solution_length"]),
+                    **analysis, "max_actions": 16, "max_exchanges": 32, "task": asdict(episode)})
+            accepted_ids.add(identity)
+    manifest = {"generator_version": EXTENDED_VERSION, "seed": seed,
+                "base": {"generator_version": base_manifest["generator_version"], "seed": base_manifest["seed"],
+                         "tasks_sha256": base_manifest["tasks_sha256"]},
+                "topology_counts": [sum(p == name for p in partitions.values())
+                                    for name in ("train", "validation_mazes", "test_mazes")],
+                "mazes_per_topology": dict(Counter(spec["topology_id"] for spec in mazes)),
+                "train_floor_plan_mazes": train_floor_plan_mazes, "heldout_floor_plan_mazes": heldout_floor_plan_mazes,
+                "rule_holdouts_per_split": rule_holdouts, "max_candidates": max_candidates,
+                "difficulty_bands": DIFFICULTIES, "mazes": mazes, "rejections": dict(rejected),
+                "splits": {split: {"tasks": sum(r["split"] == split for r in records),
+                    "difficulty": dict(Counter(r["difficulty"] for r in records if r["split"] == split))}
+                    for split in ALL_SPLITS},
+                "note": "Superset of the v1 bank: v1 mazes, tasks and splits are unchanged. *_rules splits are new "
+                        "rules/goals/switch placements on training floor plans with every start held out; *_mazes "
+                        "splits are unseen floor plans. Only 9 floor plans exist for six rooms on a 4x3 grid with "
+                        "degree <= 3; the one v1 left unused joins validation_mazes. No model calls or training."}
+    return manifest, records
+
+
 def write_bank(directory: Path, manifest: dict, records: list[dict]) -> None:
     if directory.exists() and any(directory.iterdir()):
         raise ValueError("Use a new or empty dataset directory; frozen banks are never overwritten.")
@@ -226,8 +308,10 @@ def load_bank(directory: Path) -> tuple[dict, list[dict]]:
     """Validate serialized identities and both split boundaries before selection."""
     manifest = json.loads((directory / "manifest.json").read_text())
     payload = (directory / "tasks.jsonl").read_bytes()
-    if manifest["generator_version"] != GENERATOR_VERSION or hashlib.sha256(payload).hexdigest() != manifest["tasks_sha256"]:
+    version = manifest["generator_version"]
+    if version not in (GENERATOR_VERSION, EXTENDED_VERSION) or hashlib.sha256(payload).hexdigest() != manifest["tasks_sha256"]:
         raise ValueError("Dataset version or task checksum mismatch.")
+    splits = ALL_SPLITS if version == EXTENDED_VERSION else SPLITS
     records = [json.loads(line) for line in payload.splitlines()]
     maze_specs = {row["maze_id"]: row for row in manifest["mazes"]}
     if len(maze_specs) != len(manifest["mazes"]):
@@ -241,10 +325,12 @@ def load_bank(directory: Path) -> tuple[dict, list[dict]]:
                 or row["maze_id"] != identity or spec is None or spec["topology_id"] != family):
             raise ValueError("Task identity mismatch or duplicate episode.")
         split = row["split"]
-        if split not in SPLITS or spec["start_splits"].get(task.initial.room) != split:
+        if split not in splits or spec["start_splits"].get(task.initial.room) != split:
             raise ValueError("Starting-room split mismatch.")
         partition = "train" if split in ("train", "validation_starts", "test_starts") else split
-        if spec["partition"] != partition or family_partitions.setdefault(family, partition) != partition:
+        # Rule holdouts reuse training floor plans by design; floor-plan holdouts never do.
+        floor_plan = "train" if partition in RULE_SPLITS else partition
+        if spec["partition"] != partition or family_partitions.setdefault(family, floor_plan) != floor_plan:
             raise ValueError("Equivalent topologies cross structural split boundaries.")
         static = {"rooms": row["task"]["rooms"], "goal": task.goal}
         if maze_tasks.setdefault(identity, static) != static:
@@ -268,10 +354,12 @@ def load_bank(directory: Path) -> tuple[dict, list[dict]]:
             raise ValueError("Starting rooms must follow the frozen 3/1/1 split.")
     if ([sum(p == partition for p in family_partitions.values())
          for partition in ("train", "validation_mazes", "test_mazes")] != manifest["topology_counts"]
-            or any(count != manifest["mazes_per_topology"]
-                   for count in Counter(spec["topology_id"] for spec in maze_specs.values()).values())):
+            or (dict(Counter(spec["topology_id"] for spec in maze_specs.values())) != manifest["mazes_per_topology"]
+                if isinstance(manifest["mazes_per_topology"], dict) else
+                any(count != manifest["mazes_per_topology"]
+                    for count in Counter(spec["topology_id"] for spec in maze_specs.values()).values()))):
         raise ValueError("Topology or maze counts do not match the manifest.")
-    for split in SPLITS:
+    for split in splits:
         rows = [row for row in records if row["split"] == split]
         if manifest["splits"][split] != {"tasks": len(rows), "difficulty": dict(Counter(row["difficulty"] for row in rows))}:
             raise ValueError("Split counts do not match the task bank.")
@@ -281,7 +369,7 @@ def load_bank(directory: Path) -> tuple[dict, list[dict]]:
 def select_tasks(records: list[dict], split: str = "train", limit: int = 12,
                  seed: int = 0, difficulties: tuple[str, ...] = tuple(DIFFICULTIES)) -> list[dict]:
     """Round-robin difficulty and maze IDs; sample without replacement within a batch."""
-    if split not in SPLITS or type(limit) is not int or limit <= 0 or not difficulties or len(set(difficulties)) != len(difficulties):
+    if split not in ALL_SPLITS or type(limit) is not int or limit <= 0 or not difficulties or len(set(difficulties)) != len(difficulties):
         raise ValueError("Choose a valid split, a positive task limit, and distinct difficulty bands.")
     if any(name not in DIFFICULTIES for name in difficulties):
         raise ValueError("Unknown difficulty band.")

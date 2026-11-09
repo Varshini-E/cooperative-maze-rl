@@ -23,7 +23,7 @@ from panel_guide.conversation import Agent, Completion, Conversation, Recorder, 
 from panel_guide.curriculum import task_id
 from panel_guide.tinker_backend import TinkerAgent, model_messages, public_text
 
-ENV_VERSION = "maze-tinker-env-v2"
+ENV_VERSIONS = {"v8": "maze-tinker-env-v3-strict", "v9": "maze-tinker-env-v4-notes"}
 
 
 class RolloutInterrupted(RuntimeError):
@@ -83,11 +83,12 @@ class MazeEnv(Env):
             observation = self._observation(self.conversation.next_expert_request())
         else:
             observation = tinker.ModelInput.empty()
-            stop = {"goal_reached": "completed", "action_limit": "max_tool_calls", "exchange_limit": "max_turns"}[result.reason]
+            stop = {"goal_reached": "completed", "action_limit": "max_tool_calls", "exchange_limit": "max_turns",
+                    "protocol_failure": "protocol_failure"}[result.reason]
             metrics.update({"success": int(result.status == "success"), f"stop/{stop}": 1})
         return StepResult(reward=result.reward if result else 0.0, episode_done=result is not None,
                           next_observation=observation, next_stop_condition=self.renderer.get_stop_sequences(),
-                          metrics=metrics, logs={"environment_version": ENV_VERSION})
+                          metrics=metrics, logs={"environment_version": ENV_VERSIONS[self.conversation.prompt_version]})
 
 
 @dataclass(frozen=True)
@@ -116,15 +117,14 @@ class MazeGroupBuilder(EnvGroupBuilder):
                     or conversation.game.audit_state != conversation.task.initial
                     or conversation.game.remaining_actions != conversation.max_actions):
                 raise ValueError("Group members must be fresh, unstarted episodes.")
-            settings.add((conversation.prompt_version, conversation.observation_mode, conversation.operator_history,
-                          conversation.max_actions, conversation.max_exchanges, conversation.expert_instructions,
+            settings.add((conversation.prompt_version, conversation.max_actions, conversation.max_exchanges, conversation.expert_instructions,
                           env.max_tokens, env.context_tokens, env.timeout_seconds))
         if len(settings) != 1:
             raise ValueError("All attempts in a group must use the same prompts and budgets.")
         return envs
 
     def logging_tags(self) -> list[str]:
-        return ["maze", ENV_VERSION]
+        return ["maze"]
 
 
 class ExpertTokenPolicy(TokenCompleter):
@@ -149,7 +149,8 @@ class ExpertTokenPolicy(TokenCompleter):
 
 def save_trajectory(trajectory: Trajectory, path: Path) -> None:
     """Exact Expert sampling records; Operator text appears only inside observations."""
-    path.write_text(json.dumps({"environment_version": ENV_VERSION, "stop_reason": trajectory.stop_reason,
+    version = trajectory.transitions[-1].logs["environment_version"] if trajectory.transitions else None
+    path.write_text(json.dumps({"environment_version": version, "stop_reason": trajectory.stop_reason,
         "transitions": [{"observation_tokens": step.ob.to_ints(), "action_tokens": step.ac.tokens,
                          "sampling_logprobs": step.ac.logprobs, "sampling_stop_reason": step.ac.stop_reason,
                          "reward": step.reward, "episode_done": step.episode_done,

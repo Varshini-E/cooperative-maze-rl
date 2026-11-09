@@ -13,11 +13,11 @@ A quick try at building an RL environment with Tinker. The idea was inspired by 
 | Component | Role |
 |---|---|
 | Environment | Generated six-room mazes, two persistent switches and a goal. A solver verifies solvability. |
-| Expert — Qwen3-8B | Trainable text model. Receives the private manual and full conversation, without images. |
+| Expert — Qwen3-8B | Trainable text model with thinking. Receives the private manual and full conversation, without images. |
 | Operator — Qwen3.5-9B | Frozen visual model. Receives current overview/detail images and the last two exchanges. |
 | Harness | Routes messages, validates JSON actions, executes them and returns feedback. |
 
-The Expert sends `ask` or `instruct`. The Operator answers or requests `move` or `toggle`. Only validated physical actions change the maze.
+The Expert sends `ask` or `instruct`. The Operator answers or requests `move` or `toggle`. Only validated physical actions change the maze. An invalid Expert message ends the episode with reward 0. With prompt `v9` (default), the Expert may also keep a short private note; `v8` is the same without notes.
 
 ![Example maze](docs/maze.png)
 
@@ -39,7 +39,10 @@ The current objective is a **simplified GRPO-style update**:
 
 1. Sample eight fresh episodes on the same task, with independent resets.
 2. Compute each episode's advantage: reward minus the group's mean reward.
-3. Apply one importance-sampling update, refresh the Expert sampler and repeat.
+3. Scale each episode by mean length / its length, so long failures don't outweigh short successes.
+4. Apply one importance-sampling update, refresh the Expert sampler and repeat.
+
+There is no PPO clipping or reference KL. Update helpers are in `panel_guide/train.py`; `panel_guide/task_sampler.py` picks training tasks likely to give mixed-reward groups.
 
 ## Run the local demo
 
@@ -50,7 +53,7 @@ uv sync --locked
 
 Writes images and traces to `outputs/maze-overview-demo/`, without model calls.
 
-Run checks with `.venv/bin/python -m unittest discover -s tests`.
+Run checks with `.venv/bin/python -m unittest discover -s tests` (Env and training tests need `--extra models`).
 
 For a paid model episode, copy `.env.example` to `.env`, set `TINKER_API_KEY`, then run:
 
@@ -61,8 +64,8 @@ uv sync --locked --extra models
 
 Settings live in [configs/maze.toml](configs/maze.toml). Generate a maze bank with `.venv/bin/python -m panel_guide.generate_mazes --output-dir data/mazes`.
 
-## Current experiment
+## Results so far
 
-SFT, RL and inference comparisons have been run. Thinking improved sampled completion; reliable gains from RL remain unestablished. The current local experiment trains the initial Expert with thinking on two easy tasks, using groups of eight and no supervised replay.
+Thinking improved completion without training. RL fits the tasks it trains on (4-task pilot: **20/32 → 25/32**) but has not improved unseen tasks (**81 vs 82 of 120**). See [RL status](docs/rl-status.md).
 
-The public code contains the environment, rollout interface and tests. Its demo configuration is V7 with thinking disabled. Local research uses V8 with thinking enabled; training scripts and full experiment artifacts are not yet included in the public repository.
+This repository contains the environment, rollout interface, update helpers and tests. Training launchers and run artifacts are kept locally.

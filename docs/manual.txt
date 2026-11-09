@@ -20,11 +20,11 @@ Garden (emblem: leaf)
 
 Tower (emblem: star)
 - triangle door -> Gallery; always open.
-- solid circle control toggles switch B.
+- solid_circle_control toggles switch B.
 
 Vault (emblem: diamond)
 - zigzag door -> Gallery; requires A on and B on.
 
 Workshop (emblem: anvil)
 - zigzag door -> Crescent; always open.
-- striped circle control toggles switch A.
+- striped_circle_control toggles switch A.

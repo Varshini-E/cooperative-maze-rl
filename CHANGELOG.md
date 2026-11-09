@@ -1,6 +1,6 @@
 # What changed, and what helped
 
-October 27, 2026. Manually maintained experiment notes. Full traces and earlier plans are archived locally.
+Updated November 9, 2026. Manually maintained experiment notes. Full traces and earlier plans are archived locally.
 
 ## 1. Better communication
 
@@ -21,9 +21,12 @@ SFT used **307 reviewed Expert messages**. Development completion rose **6/16 �
 
 With thinking, SFT scored **15/24 versus initial 17/24**. There is no consistent warm-start advantage. The old demonstrations were non-thinking; current RL omits them.
 
-## 4. What is still wrong with RL?
+## 4. RL
 
-- **Format collapse:** original RL caused roughly 60% rejected Expert messages.
-- **Stabilization:** lower learning rate + replay preserved formatting, but completion went **9/16 → 9/16** (V7) and **10/16 → 8/16** (V8).
-- **Open problem:** updates work; reliable completion gains remain unproven. Sparse episode credit, partner errors and long responses receiving more loss weight are possible contributors, not established causes.
-- **Current test:** thinking-enabled Expert-only RL, two easy tasks, groups of eight, `1e-6` learning rate, no replay; up to eight batches and fresh interleaved initial/final evaluation. This tests task fitting only.
+- **Format collapse:** the original token-summed loss at LR 4.7e-4 caused ~60% rejected Expert messages.
+- **Too small a step:** at LR 1e-6, format held but completion went **12/16 → 8/16**.
+- **Length bias:** failed episodes are longer, so token-summed loss weighted them **2.2–6.8×** more than successes. An overfit test selected per-episode normalization at LR 1e-4.
+- **Fitting, not generalizing:** a 4-task pilot improved **20/32 → 25/32**; on unseen tasks it scored **37 vs 36 of 48**, and a broader run **81 vs 82 of 120**.
+- **Bottleneck:** a scripted correct Expert with the real Operator solved **15/16**; the Expert's planning limits success.
+
+See [RL status](docs/rl-status.md).

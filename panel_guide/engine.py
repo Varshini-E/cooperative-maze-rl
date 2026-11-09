@@ -35,7 +35,7 @@ class VisibleControl:
 
 @dataclass(frozen=True)
 class RoomView:
-    """Current-room fields used by scripted diagnostics and the legacy renderer."""
+    """Current-room fields used by the scripted agents."""
 
     emblem: str
     doors: tuple[VisibleDoor, ...]

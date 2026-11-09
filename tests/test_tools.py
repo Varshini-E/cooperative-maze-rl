@@ -27,10 +27,10 @@ MOVE = '{"type":"move","target":"door_1"}'
 
 
 class ToolContractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_wrong_turn_reply_is_rejected_and_next_turn_can_recover(self):
-        expert = QueueAgent(INSTRUCT, INSTRUCT)
-        operator = QueueAgent('{"type":"reply","text":"The ring door is open."}', MOVE)
-        conversation = Conversation(example_task(), max_exchanges=2, prompt_version="v3")
+    async def test_wrong_turn_action_is_rejected_and_next_turn_can_recover(self):
+        expert = QueueAgent(ASK, INSTRUCT)
+        operator = QueueAgent(MOVE, MOVE)
+        conversation = Conversation(example_task(), max_exchanges=2)
         with tempfile.TemporaryDirectory() as directory:
             result = await conversation.run(expert, operator, Recorder(Path(directory)))
             events = [json.loads(line) for line in (Path(directory) / "trace.jsonl").read_text().splitlines()]
@@ -42,14 +42,14 @@ class ToolContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(e["type"] == "completion" and e["role"] == "operator"
                             and e["exchange"] == 1 for e in events))
         feedback = [e for e in events if e["type"] == "feedback"][0]
-        self.assertEqual(feedback["error"], "instruction_following_failure")
+        self.assertEqual(feedback["error"], "invalid_output")
         self.assertFalse(feedback["executed"])
         next_input = expert.requests[1].text_messages()[-1]["content"]
         self.assertIn("No action was executed", next_input)
-        self.assertIn("instruction_following_failure", next_input)
+        self.assertIn("invalid_output", next_input)
 
     async def test_ask_cannot_dispatch_a_tool(self):
-        conversation = Conversation(example_task(), max_exchanges=1, prompt_version="v3")
+        conversation = Conversation(example_task(), max_exchanges=1)
         result = await conversation.run(QueueAgent(ASK), QueueAgent(MOVE))
         self.assertEqual(result.actions, 0)
         self.assertEqual(conversation.game.audit_state, example_task().initial)
@@ -69,7 +69,7 @@ class ToolContractTests(unittest.IsolatedAsyncioTestCase):
         )
         for response in responses:
             with self.subTest(response=response):
-                conversation = Conversation(example_task(), max_exchanges=1, prompt_version="v3")
+                conversation = Conversation(example_task(), max_exchanges=1)
                 result = await conversation.run(QueueAgent(INSTRUCT), QueueAgent(response))
                 self.assertEqual(result.actions, 0)
                 self.assertEqual(conversation.game.audit_state, example_task().initial)
@@ -79,7 +79,7 @@ class ToolContractTests(unittest.IsolatedAsyncioTestCase):
         expert = QueueAgent(INSTRUCT, INSTRUCT, INSTRUCT)
         operator = QueueAgent(MOVE, '{"type":"move","target":"door_2"}',
                               '{"type":"move","target":"door_99"}')
-        conversation = Conversation(example_task(), max_actions=3, prompt_version="v3")
+        conversation = Conversation(example_task(), max_actions=3)
         with tempfile.TemporaryDirectory() as directory:
             result = await conversation.run(expert, operator, Recorder(Path(directory)))
             events = [json.loads(line) for line in (Path(directory) / "trace.jsonl").read_text().splitlines()]
@@ -98,7 +98,7 @@ class ToolContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"outcome": "blocked"', expert.requests[2].text_messages()[-1]["content"])
 
     async def test_clarification_is_a_valid_non_action(self):
-        conversation = Conversation(example_task(), max_exchanges=1, prompt_version="v3")
+        conversation = Conversation(example_task(), max_exchanges=1)
         result = await conversation.run(QueueAgent(INSTRUCT),
             QueueAgent('{"type":"unclear","text":"No controls are visible."}'))
         self.assertEqual(result.actions, 0)
@@ -107,13 +107,14 @@ class ToolContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(conversation.history[-1]["executed"])
 
     async def test_current_schema_is_turn_specific_and_contains_no_room_state(self):
-        conversation = Conversation(example_task(), prompt_version="v3")
-        for turn, allowed in (("ask", {"reply", "unclear"}), ("instruct", {"move", "toggle", "unclear"})):
+        conversation = Conversation(example_task())
+        for turn, allowed in (("ask", {"reply", "unclear"}),
+                              ("instruct", {"move", "toggle", "satisfied", "unclear", "reply"})):
             conversation.history = [{"role": "expert", "type": turn, "text": "Current message"}]
             messages = model_messages(conversation._request("operator"))
             parts = messages[-1]["content"]
-            self.assertEqual([p["type"] for p in parts], ["image", "text"])
-            schema = json.loads(parts[1]["text"].split("CURRENT TURN CONTRACT (JSON Schema):\n")[1])
+            self.assertEqual([p["type"] for p in parts], ["text", "image", "text", "image", "text"])
+            schema = json.loads(parts[-1]["text"].split("CURRENT TURN CONTRACT (JSON Schema):\n")[1])
             self.assertEqual({s["properties"]["type"]["const"] for s in schema["oneOf"]}, allowed)
             self.assertNotIn("PRIVATE MANUAL", str(messages))
             self.assertNotIn("scripted_view", str(messages))
@@ -122,10 +123,10 @@ class ToolContractTests(unittest.IsolatedAsyncioTestCase):
         operator_response_schema("ask")["oneOf"].clear()
         self.assertEqual(len(operator_response_schema("ask")["oneOf"]), 2)
         with self.assertRaises(ProtocolError):
-            parse_message('{"type":"reply","text":"Description"}', "operator", operator_turn="instruct")
+            parse_message(MOVE, "operator", operator_turn="ask")
 
     async def test_scripted_episode_succeeds_with_strict_contract(self):
-        result = await Conversation(example_task(), prompt_version="v3").run(ScriptedExpert(), ScriptedOperator())
+        result = await Conversation(example_task()).run(ScriptedExpert(), ScriptedOperator())
         self.assertEqual((result.status, result.actions, result.exchanges, result.reward), ("success", 9, 18, 1.0))
 
 

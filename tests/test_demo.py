@@ -1,15 +1,13 @@
 import json
-from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from panel_guide.demo import run_demo
-from panel_guide.engine import MazeGame, RoomView
-from panel_guide.render import render_room
-from panel_guide.tasks import SYMBOLS, State, example_task
+from panel_guide.render import draw_symbol
+from panel_guide.tasks import SYMBOLS
 
 
 class DemoTests(unittest.TestCase):
@@ -43,21 +41,13 @@ class DemoTests(unittest.TestCase):
             self.assertEqual(len(list((output / "reference").glob("frame-*.png"))), 3)
             self.assertEqual(len(list((output / "reference").glob("detail-*.png"))), 3)
 
-    def test_hidden_state_does_not_change_identical_room_images(self):
-        task = example_task()
-        other = replace(task, initial=State("Crescent", (True, True)), goal="Tower")
-        left_view, right_view = MazeGame(task).view, MazeGame(other).view
-        self.assertEqual(left_view, right_view)
-        with render_room(left_view) as left, render_room(right_view) as right:
-            self.assertEqual(left.tobytes(), right.tobytes())
-
     def test_all_symbols_have_distinct_renderings(self):
         pixels = set()
         for symbol in SYMBOLS:
-            with render_room(RoomView(symbol, (), ())) as image:
-                pixels.add(image.tobytes())
+            image = Image.new("RGB", (80, 80), "white")
+            draw_symbol(ImageDraw.Draw(image), symbol, (40, 40), 32)
+            pixels.add(image.tobytes())
         self.assertEqual(len(pixels), len(SYMBOLS))
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ from PIL import Image
 from panel_guide.conversation import Conversation
 from panel_guide.curriculum import development_task
 from panel_guide.engine import Action, MazeGame, observe, observe_maze
-from panel_guide.render import render_maze, render_room
+from panel_guide.render import crop_current_room, render_maze
 from panel_guide.tasks import State, example_task
 from panel_guide.tinker_backend import model_messages
 
@@ -95,17 +95,20 @@ class MazeViewTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 replace(task.rooms[0], position=position)
 
-    def test_operator_gets_one_full_maze_image_and_expert_remains_text_only(self):
-        conversation = Conversation(example_task(), prompt_version="v3")
+    def test_operator_gets_maze_and_room_crop_and_expert_remains_text_only(self):
+        conversation = Conversation(example_task())
         conversation.history = [{"role": "expert", "type": "ask", "text": "Describe your current room."}]
         request = conversation._request("operator")
         with Image.open(io.BytesIO(request.image_png)) as actual, render_maze(conversation.game.maze_view) as expected:
             self.assertEqual(actual.size, (1480, 852))
             self.assertEqual(actual.tobytes(), expected.tobytes())
             self.assertFalse(actual.info)
+            with Image.open(io.BytesIO(request.detail_png)) as detail, \
+                    crop_current_room(expected, conversation.game.maze_view) as crop:
+                self.assertEqual(detail.tobytes(), crop.tobytes())
         messages = model_messages(request)
         parts = messages[-1]["content"]
-        self.assertEqual([p["type"] for p in parts], ["image", "text"])
+        self.assertEqual([p["type"] for p in parts], ["text", "image", "text", "image", "text"])
         self.assertNotIn("PRIVATE MANUAL", str(messages))
         self.assertNotIn("maze_view", str(messages))
         self.assertIn("gray ? means UNKNOWN", request.system)
@@ -114,16 +117,10 @@ class MazeViewTests(unittest.TestCase):
         self.assertIsNone(expert.scripted_view)
         self.assertIn("PRIVATE MANUAL", expert.system)
 
-    def test_legacy_room_mode_is_explicit_and_still_available(self):
-        conversation = Conversation(example_task(), observation_mode="room")
-        request = conversation._request("operator")
-        with Image.open(io.BytesIO(request.image_png)) as actual, render_room(conversation.game.view) as expected:
-            self.assertEqual(actual.size, (960, 720))
-            self.assertEqual(actual.tobytes(), expected.tobytes())
-        self.assertNotIn("ONE complete maze", request.system)
-        with self.assertRaises(ValueError):
-            Conversation(example_task(), observation_mode="invalid")
-
+    def test_unknown_prompt_version_is_rejected(self):
+        for version in ("v7", "v10", ""):
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                Conversation(example_task(), prompt_version=version)
 
 if __name__ == "__main__":
     unittest.main()

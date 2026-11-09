@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 from panel_guide.conversation import Conversation, Recorder
 from panel_guide.curriculum import LEVELS, development_task, task_id
-from panel_guide.render import render_version
+from panel_guide.render import RENDER_VERSION
 from panel_guide.reporting import dependency_versions
 from panel_guide.scripted import COMMAND_CONTRACT, DiagnosticOperator, ScriptedExpert, ScriptedOperator
 from panel_guide.solver import analyze_task
@@ -24,8 +24,6 @@ async def run(args: argparse.Namespace) -> int:
     # Parse only the project's .env; never execute it or replace exported values.
     load_dotenv(dotenv_path=Path(".env"), override=False, interpolate=False)
     config = tomllib.loads(args.config.read_text())
-    if getattr(args, "operator_history", None):
-        config["operator_history"] = args.operator_history
     expert_config = ModelConfig(**config["expert"])
     operator_config = ModelConfig(**config["operator"])
     if args.check:
@@ -42,17 +40,15 @@ async def run(args: argparse.Namespace) -> int:
         raise ValueError("The Cookbook runner samples a real Expert; use conversation for scripted Expert diagnostics.")
     environment_version = None
     if runner == "cookbook":
-        from panel_guide.tinker_env import ENV_VERSION, run_cookbook_episode
-        environment_version = ENV_VERSION
+        from panel_guide.tinker_env import ENV_VERSIONS, run_cookbook_episode
+        environment_version = ENV_VERSIONS[config["prompt_version"]]
     max_actions = min(config["max_actions"], level.max_actions)
     analysis = analyze_task(task, max_actions)
     if not analysis.within_action_budget or analysis.dead_end_states:
         raise ValueError("Task must be solvable within budget and have no reachable dead ends.")
     conversation = Conversation(task, max_actions=max_actions,
                                 max_exchanges=min(config["max_exchanges"], level.max_exchanges),
-                                prompt_version=config.get("prompt_version", "v1"),
-                                observation_mode=config.get("observation_mode", "maze"),
-                                operator_history=config.get("operator_history", "full"),
+                                prompt_version=config["prompt_version"],
                                 expert_instructions=COMMAND_CONTRACT if diagnostic else "")
     budget = None
     service = None
@@ -69,7 +65,7 @@ async def run(args: argparse.Namespace) -> int:
     (output / "run.json").write_text(json.dumps({"backend": args.backend, "runner": runner, "config": config,
         "environment_version": environment_version,
         "task": args.task, "layout": args.layout, "task_id": task_id(task),
-        "observation_mode": conversation.observation_mode, "renderer": render_version(conversation.observation_mode),
+        "renderer": RENDER_VERSION,
         "partner": args.partner if args.backend == "tinker" else "scripted",
         "dependencies": dependency_versions(), "budget_usd": args.budget_usd}, indent=2) + "\n")
     if budget:
@@ -114,8 +110,6 @@ def main() -> None:
     parser.add_argument("--layout", type=int, choices=range(6), default=0)
     parser.add_argument("--partner", choices=("visual", "scripted", "guided"), default="visual",
                         help="Tinker: real pair, real Expert with scripted observations, or scripted guide with real VLM.")
-    parser.add_argument("--operator-history", choices=("full", "latest", "recent2"),
-                        help="Override how much shared text reaches the Operator; Expert retains full history.")
     parser.add_argument("--config", type=Path, default=Path("configs/maze.toml"))
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--budget-usd", type=float)

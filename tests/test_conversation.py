@@ -89,12 +89,13 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conversation.game.audit_state, example_task().initial)
         self.assertEqual(conversation.history[-1]["error"], "invalid_output")
 
-    async def test_invalid_expert_skips_operator_and_consumes_exchange(self):
-        operator = QueueAgent()
-        conversation = Conversation(example_task(), max_exchanges=2)
-        result = await conversation.run(QueueAgent("bad JSON", Completion(INSTRUCT, "length")), operator)
-        self.assertEqual((result.exchanges, result.actions), (2, 0))
-        self.assertFalse(operator.requests)
+    async def test_invalid_expert_ends_episode_without_operator_call(self):
+        for bad in ("bad JSON", Completion(INSTRUCT, "length")):
+            with self.subTest(bad=bad):
+                operator = QueueAgent()
+                result = await Conversation(example_task()).run(QueueAgent(bad), operator)
+                self.assertEqual((result.reason, result.exchanges, result.actions), ("protocol_failure", 1, 0))
+                self.assertFalse(operator.requests)
 
     async def test_malformed_operator_and_clarification_do_not_mutate_state(self):
         conversation = Conversation(example_task(), max_exchanges=3)
@@ -129,6 +130,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         operator = QueueAgent(MOVE, '{"type":"reply","text":"anvil"}')
         await Conversation(example_task(), max_exchanges=2).run(expert, operator)
         self.assertNotEqual(operator.requests[0].image_png, operator.requests[1].image_png)
+        self.assertNotEqual(operator.requests[0].detail_png, operator.requests[1].detail_png)
         for request in expert.requests:
             self.assertIsNone(request.image_png)
             self.assertIsNone(request.scripted_view)
@@ -136,8 +138,8 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         for request in operator.requests:
             messages = model_messages(request)
             parts = messages[-1]["content"]
-            self.assertEqual([part["type"] for part in parts], ["image", "text"])
-            self.assertNotIn("scripted_view", parts[1]["text"])
+            self.assertEqual([part["type"] for part in parts], ["text", "image", "text", "image", "text"])
+            self.assertNotIn("scripted_view", parts[-1]["text"])
             self.assertNotIn("MAZE MANUAL", str(messages))
 
 

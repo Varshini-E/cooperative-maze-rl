@@ -86,23 +86,24 @@ class SpendingGuard:
         return amount
 
 
+def _rgb(png: bytes) -> Image.Image:
+    with Image.open(io.BytesIO(png)) as image:
+        return image.convert("RGB")
+
+
 def model_messages(request: Request) -> list[dict]:
     messages = request.text_messages()
     if request.role == "expert":
         if request.image_png is not None or request.detail_png is not None:
             raise ValueError("Expert inputs must be text-only.")
     elif request.role == "operator":
-        if request.image_png is None:
-            raise ValueError("Operator needs the current screenshot.")
-        with Image.open(io.BytesIO(request.image_png)) as image:
-            current = image.convert("RGB")
-        parts = [{"type": "image", "image": current}]
-        if request.detail_png is not None:
-            with Image.open(io.BytesIO(request.detail_png)) as image:
-                detail = image.convert("RGB")
-            parts = [{"type": "text", "text": "Image 1: whole maze (current overview)."}, *parts,
-                     {"type": "text", "text": "Image 2: enlarged current-room crop from that same overview."},
-                     {"type": "image", "image": detail}]
+        if request.image_png is None or request.detail_png is None:
+            raise ValueError("Operator needs the current overview and room crop.")
+        overview, detail = (_rgb(png) for png in (request.image_png, request.detail_png))
+        parts = [{"type": "text", "text": "Image 1: whole maze (current overview)."},
+                 {"type": "image", "image": overview},
+                 {"type": "text", "text": "Image 2: enlarged current-room crop from that same overview."},
+                 {"type": "image", "image": detail}]
         messages[-1]["content"] = [*parts, {"type": "text", "text": messages[-1]["content"]}]
     else:
         raise ValueError("Unknown agent role.")

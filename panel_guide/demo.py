@@ -7,7 +7,7 @@ from pathlib import Path
 
 from panel_guide.engine import Action, MazeGame
 from panel_guide.manual import build_manual
-from panel_guide.render import DETAIL_RENDER_VERSION, crop_current_room, render_maze
+from panel_guide.render import RENDER_VERSION, crop_current_room, render_maze
 from panel_guide.solver import analyze_task, solve
 from panel_guide.tasks import example_task
 
@@ -77,8 +77,7 @@ def run_demo(output_dir: Path, max_actions: int = 16) -> dict:
         })
     audit = {
         "kind": "privileged_maze_demo_trace",
-        "renderer": DETAIL_RENDER_VERSION,
-        "observation_mode": "maze_detail",
+        "renderer": RENDER_VERSION,
         "task": asdict(task),
         "analysis": asdict(analysis),
         "solution": [asdict(action) for action in solution],

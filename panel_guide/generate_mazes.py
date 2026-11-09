@@ -5,7 +5,7 @@ from pathlib import Path
 
 from panel_guide.engine import MazeGame
 from panel_guide.manual import build_manual
-from panel_guide.maze_bank import generate_bank, load_bank, write_bank
+from panel_guide.maze_bank import extend_bank, generate_bank, load_bank, write_bank
 from panel_guide.render import crop_current_room, render_maze
 from panel_guide.tasks import task_from_dict
 
@@ -36,11 +36,20 @@ def main() -> None:
     parser.add_argument("--topologies", type=int, nargs=3, metavar=("TRAIN", "VAL", "TEST"), default=(4, 2, 2))
     parser.add_argument("--mazes-per-topology", type=int, default=3)
     parser.add_argument("--max-candidates", type=int, default=5000)
+    parser.add_argument("--extend-from", type=Path, help="Build a v2 superset of this frozen v1 bank.")
+    parser.add_argument("--train-floor-plan-mazes", type=int, default=12)
+    parser.add_argument("--heldout-floor-plan-mazes", type=int, default=10)
+    parser.add_argument("--rule-holdouts", type=int, default=2)
     args = parser.parse_args()
     try:
         if args.output_dir.exists() and any(args.output_dir.iterdir()):
             raise ValueError("Use a new or empty dataset directory.")
-        manifest, records = generate_bank(args.seed, tuple(args.topologies), args.mazes_per_topology, args.max_candidates)
+        if args.extend_from:
+            manifest, records = extend_bank(*load_bank(args.extend_from), seed=args.seed,
+                train_floor_plan_mazes=args.train_floor_plan_mazes,
+                heldout_floor_plan_mazes=args.heldout_floor_plan_mazes, rule_holdouts=args.rule_holdouts)
+        else:
+            manifest, records = generate_bank(args.seed, tuple(args.topologies), args.mazes_per_topology, args.max_candidates)
         write_bank(args.output_dir, manifest, records)
         load_bank(args.output_dir)
         write_previews(args.output_dir, records)

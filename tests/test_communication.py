@@ -3,7 +3,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from panel_guide.conversation import Completion, Conversation, OPERATOR_PROMPT_V7
+from panel_guide.conversation import Completion, Conversation, OPERATOR_PROMPT
 from panel_guide.tasks import example_task
 from panel_guide.tinker_backend import model_messages
 from tests.test_tools import QueueAgent
@@ -16,10 +16,8 @@ def message(kind, text):
 class CommunicationTests(unittest.IsolatedAsyncioTestCase):
     def test_current_config_and_prompt_examples(self):
         config = tomllib.loads(Path("configs/maze.toml").read_text())
-        self.assertEqual(config["prompt_version"], "v7")
-        self.assertEqual(config["operator_history"], "recent2")
-        self.assertEqual(config["observation_mode"], "maze_detail")
-        examples = [json.loads(line) for line in OPERATOR_PROMPT_V7.splitlines() if line.startswith('{')]
+        self.assertEqual(config["prompt_version"], "v9")
+        examples = [json.loads(line) for line in OPERATOR_PROMPT.splitlines() if line.startswith('{')]
         self.assertTrue(any(e['type'] == 'reply' and 'LOCKED' in e['text'] for e in examples))
         self.assertTrue(any(e['type'] == 'reply' and 'identify' in e['text'] for e in examples))
         self.assertFalse(any(e.get('text') == 'observations' for e in examples))
@@ -33,8 +31,7 @@ class CommunicationTests(unittest.IsolatedAsyncioTestCase):
                               '{"type":"move","target":"door_1"}',
                               '{"type":"move","target":"door_2"}',
                               message("reply", "Current room: leaf."))
-        conversation = Conversation(example_task(), prompt_version="v7", operator_history="recent2",
-                                    observation_mode="maze_detail", max_exchanges=4)
+        conversation = Conversation(example_task(), max_exchanges=4)
         result = await conversation.run(expert, operator)
         self.assertEqual((result.exchanges, result.actions), (4, 2))
         first, moved_from, after_move, after_block = operator.requests
@@ -64,8 +61,7 @@ class CommunicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_followup_sees_previous_clarification_and_no_action_receipt(self):
         operator = QueueAgent(message('unclear', 'Which door do you mean?'),
                               '{"type":"move","target":"door_1"}')
-        conversation = Conversation(example_task(), prompt_version='v7', operator_history='recent2',
-                                    max_exchanges=2)
+        conversation = Conversation(example_task(), max_exchanges=2)
         await conversation.run(QueueAgent(message('instruct', 'Use that door.'),
                                           message('instruct', 'I mean door_1.')), operator)
         recent = operator.requests[1].history
@@ -75,15 +71,14 @@ class CommunicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recent[3]['text'], 'I mean door_1.')
 
     async def test_rejected_outputs_still_bound_history_by_complete_exchanges(self):
-        operator = QueueAgent(message('reply', 'OLD_REPORT'), 'not JSON', message('reply', 'Current leaf.'))
-        conversation = Conversation(example_task(), prompt_version='v7', operator_history='recent2',
-                                    max_exchanges=4)
-        await conversation.run(QueueAgent(message('ask', 'Old question'), 'invalid Expert',
-                                          message('ask', 'Second question'), message('ask', 'Current question')), operator)
+        operator = QueueAgent(message('reply', 'OLD_REPORT'), 'not JSON', 'still not JSON',
+                              message('reply', 'Current leaf.'))
+        conversation = Conversation(example_task(), max_exchanges=4)
+        await conversation.run(QueueAgent(*(message('ask', f'Question {i}') for i in range(4))), operator)
         recent = operator.requests[-1].history
         self.assertNotIn('OLD_REPORT', str(recent))
         receipts = [e for e in recent if e['role'] == 'environment']
-        self.assertEqual([e['sender'] for e in receipts], ['expert', 'operator'])
+        self.assertEqual([e['sender'] for e in receipts], ['operator', 'operator'])
         self.assertTrue(all(e['error'] == 'invalid_output' and not e['executed'] for e in receipts))
 
     async def test_mislabeled_question_is_delivered_as_unverified_report(self):
@@ -91,8 +86,7 @@ class CommunicationTests(unittest.IsolatedAsyncioTestCase):
                             message('ask', 'Which doors are open?'))
         operator = QueueAgent(message('reply', 'Current emblem: crescent.'),
                               message('reply', 'Both local doors are OPEN.'))
-        conversation = Conversation(example_task(), prompt_version='v7', operator_history='recent2',
-                                    max_exchanges=2)
+        conversation = Conversation(example_task(), max_exchanges=2)
         result = await conversation.run(expert, operator)
         self.assertEqual((result.actions, result.reward), (0, 0))
         self.assertIn('Current emblem: crescent.', str(expert.requests[1].history))
@@ -101,14 +95,13 @@ class CommunicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(receipt['executed'])
         self.assertNotIn('error', receipt)
 
-    async def test_action_boundaries_remain_strict_in_v7(self):
+    async def test_action_boundaries_remain_strict(self):
         for kind, response in [('ask', '{"type":"move","target":"door_1"}'),
                                ('instruct', message('reply', 'I moved to the goal.')),
                                ('instruct', '{"type":"move","target":"control_1"}'),
                                ('instruct', Completion('{"type":"move","target":"door_1"}', 'length'))]:
             with self.subTest(kind=kind, response=response):
-                conversation = Conversation(example_task(), prompt_version='v7', operator_history='recent2',
-                                            max_exchanges=1)
+                conversation = Conversation(example_task(), max_exchanges=1)
                 result = await conversation.run(QueueAgent(message(kind, 'Go to the goal.')), QueueAgent(response))
                 self.assertEqual((result.actions, result.reward), (0, 0))
                 self.assertEqual(conversation.game.audit_state, example_task().initial)

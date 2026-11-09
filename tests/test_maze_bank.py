@@ -54,7 +54,7 @@ class MazeBankTests(unittest.TestCase):
             # Manual is invariant to the reset state; it contains no oracle route or starting-state metadata.
             other_start = next(r.id for r in task.rooms if r.id not in (task.goal, task.initial.room))
             self.assertEqual(build_manual(task), build_manual(replace(task, initial=State(other_start, (True, True)))))
-            request = Conversation(task, prompt_version='v4', observation_mode='maze_detail', operator_history='latest').start()
+            request = Conversation(task).start()
             self.assertIsNone(request.image_png)
             self.assertNotIn('solution_length', json.dumps(request.text_messages()))
 

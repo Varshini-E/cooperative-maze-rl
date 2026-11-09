@@ -1,17 +1,15 @@
-# Working two-agent setup. Sampling only; this runner does not train weights.
-prompt_version = "v7"
-observation_mode = "maze_detail"
-operator_history = "recent2"
+# Settings used by the RL experiments. Sampling only; this runner does not train weights.
+prompt_version = "v9"  # v8 = strict Expert contract; v9 = v8 + private Expert notes
 max_exchanges = 32
 max_actions = 16
 timeout_seconds = 120
-price_checked = "2026-10-25"
+price_checked = "2026-10-27"
 price_source = "https://tinker-docs.thinkingmachines.ai/tinker/models/models_and_pricing/"
 
 [expert]
 model = "Qwen/Qwen3-8B"
-renderer = "qwen3_disable_thinking"
-max_tokens = 512
+renderer = "qwen3"  # thinking enabled
+max_tokens = 8192
 context_tokens = 32768
 temperature = 1.0
 input_usd_per_million = 0.195

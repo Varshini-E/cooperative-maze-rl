@@ -91,8 +91,7 @@ class ScriptedOperator:
             if control is None:
                 message = Message("unclear", "That control is not visible.")
             elif control.is_on:
-                message = Message("satisfied" if request.protocol_version in ("v4", "v6") else "unclear",
-                                  "The control is already ON; no toggle is needed.")
+                message = Message("satisfied", "The control is already ON; no toggle is needed.")
             else:
                 message = Message("toggle", control.id)
         else:
