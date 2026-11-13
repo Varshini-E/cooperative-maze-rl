@@ -13,3 +13,4 @@
 ## RL Training Choices
 1. Advantage computation: group mean in GRPO vs learned value function in PPO.
 2. Off-policy correction: how off-policy is the algorithm? We consider a ratio in importance sampling; clipped ratios in PPO and CISPO; one ratio per sequence in GSPO. 
+3. Current state is simple importance sampling. Need to evaluate how much differing the RL algorithm would help. 

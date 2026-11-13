@@ -4,7 +4,7 @@
 
 Train a text Expert to guide a visual Operator through a maze. Test whether RL improves questioning, navigation and recovery on unseen starts and mazes.
 
-A quick try at building an RL environment with Tinker. The idea was inspired by [GPTNT](https://gptnt.github.io/)!
+Inspired by [GPTNT](https://gptnt.github.io/).
 
 [What changed and what helped](CHANGELOG.md)
 
@@ -42,7 +42,12 @@ The current objective is a **simplified GRPO-style update**:
 3. Scale each episode by mean length / its length, so long failures don't outweigh short successes.
 4. Apply one importance-sampling update, refresh the Expert sampler and repeat.
 
-There is no PPO clipping or reference KL. Update helpers are in `panel_guide/train.py`; `panel_guide/task_sampler.py` picks training tasks likely to give mixed-reward groups.
+There is no PPO clipping or reference KL. The loop is `panel_guide/train_rl.py` (settings under `[training]` in the config), the update math is in `panel_guide/train.py`, and `panel_guide/task_sampler.py` picks tasks likely to give mixed-reward groups. Groups with an interrupted episode are dropped, and the run stops if more than 10% of a batch's episodes end on an invalid Expert message.
+
+```sh
+.venv/bin/python -m panel_guide.train_rl --bank data/mazes --check            # free: plan and rough cost
+.venv/bin/python -m panel_guide.train_rl --bank data/mazes --budget-usd 40    # paid
+```
 
 ## Run the local demo
 
@@ -68,4 +73,4 @@ Settings live in [configs/maze.toml](configs/maze.toml). Generate a maze bank wi
 
 Thinking improved completion without training. RL fits the tasks it trains on (4-task pilot: **20/32 → 25/32**) but has not improved unseen tasks (**81 vs 82 of 120**). See [RL status](docs/rl-status.md).
 
-This repository contains the environment, rollout interface, update helpers and tests. Training launchers and run artifacts are kept locally.
+Run artifacts (traces, checkpoints) are not included.

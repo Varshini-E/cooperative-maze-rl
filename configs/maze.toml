@@ -1,4 +1,4 @@
-# Settings used by the RL experiments. Sampling only; this runner does not train weights.
+# Settings for panel_guide.run_episode (sampling) and panel_guide.train_rl ([training]).
 prompt_version = "v9"  # v8 = strict Expert contract; v9 = v8 + private Expert notes
 max_exchanges = 32
 max_actions = 16
@@ -23,3 +23,15 @@ context_tokens = 65536
 temperature = 0.0
 input_usd_per_million = 0.30
 output_usd_per_million = 0.807
+
+[training]  # panel_guide.train_rl; values used by the pilot and scaled runs
+lora_rank = 16
+learning_rate = 1e-4
+grad_clip_norm = 1.0
+loss_fn = "importance_sampling"
+normalization = "per_episode"  # see panel_guide/train.py
+group_size = 8
+tasks_per_batch = 6
+stop_invalid_rate = 0.10  # stop if this share of a batch's episodes ends on an invalid Expert message
+checkpoint_ttl_seconds = 1209600
+train_usd_per_million = 0.44
