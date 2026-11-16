@@ -4,7 +4,7 @@ import unittest
 
 from panel_guide.engine import Action, MazeGame, door_is_open, observe, transition
 from panel_guide.manual import build_manual
-from panel_guide.solver import analyze_task, solve
+from panel_guide.solver import analyze_task, distances_to_goal, reachable_states, solve
 from panel_guide.tasks import Door, Requirement, Room, State, example_task
 
 
@@ -191,6 +191,13 @@ class SolverTests(unittest.TestCase):
         self.assertLessEqual(report.reachable_state_count, 24)
         self.assertFalse(analyze_task(example_task(), max_actions=8).within_action_budget)
 
+    def test_distances_are_shortest_routes_from_every_reachable_state(self):
+        task = example_task()
+        distance = distances_to_goal(task)
+        for state in reachable_states(task):
+            self.assertEqual(distance[state], len(solve(task, state)))
+        self.assertEqual([distance[s] for s in (task.initial, *EXPECTED)], list(range(9, -1, -1)))
+
     def test_initial_switch_values_change_needed_actions(self):
         expected = {(False, False): (9, 2), (False, True): (6, 1),
                     (True, False): (6, 1), (True, True): (3, 0)}
@@ -222,6 +229,7 @@ class SolverTests(unittest.TestCase):
         self.assertIsNone(report.requires_revisit)
         self.assertFalse(report.within_action_budget)
         self.assertEqual(len(report.dead_end_states), report.reachable_state_count)
+        self.assertEqual(len(distances_to_goal(impossible)), 0)
 
 
 if __name__ == "__main__":

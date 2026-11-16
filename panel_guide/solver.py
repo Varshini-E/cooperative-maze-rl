@@ -2,6 +2,8 @@
 
 from collections import deque
 from dataclasses import dataclass
+from functools import lru_cache
+from types import MappingProxyType
 
 from panel_guide.engine import Action, local_actions, transition
 from panel_guide.tasks import MazeTask, State
@@ -33,6 +35,25 @@ def solve(task: MazeTask, initial: State | None = None) -> tuple[Action, ...] | 
                 seen.add(after)
                 queue.append((after, (*path, action)))
     return None
+
+
+@lru_cache(maxsize=512)
+def distances_to_goal(task: MazeTask) -> MappingProxyType:
+    """Exact physical actions to the goal for each reachable state; dead ends are absent.
+
+    Controller-side only (progress credit, provably-lost checks); never an agent observation.
+    """
+    states = reachable_states(task)
+    edges = {state: [after for _, after in successors(task, state)] for state in states}
+    distance = {state: 0 for state in states if state.room == task.goal}
+    frontier = list(distance)
+    while frontier:
+        reached = set(frontier)
+        frontier = [state for state in states if state not in distance
+                    and any(after in reached for after in edges[state])]
+        for state in frontier:
+            distance[state] = distance[next(iter(reached))] + 1
+    return MappingProxyType(distance)
 
 
 def reachable_states(task: MazeTask) -> frozenset[State]:

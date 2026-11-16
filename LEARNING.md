@@ -13,4 +13,14 @@
 ## RL Training Choices
 1. Advantage computation: group mean in GRPO vs learned value function in PPO.
 2. Off-policy correction: how off-policy is the algorithm? We consider a ratio in importance sampling; clipped ratios in PPO and CISPO; one ratio per sequence in GSPO. 
-3. Current state is simple importance sampling. Need to evaluate how much differing the RL algorithm would help. 
+3. First attempt is simple importance sampling. Need to evaluate how much differing the RL algorithm would help. 
+4. PPO over 3 steps per batch moved success but still no transfer.
+
+## Setbacks
+November 15, 2026
+1. Bottlenecked by the Expert model? RL fits training tasks but fails to generalize. 
+2. Restarting from current failures didn't help.
+
+## Next Steps
+1. Need to fix the fine-tuning first - how to perform variations?
+2. DAGGER-like implementation?

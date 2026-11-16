@@ -9,6 +9,7 @@ import io
 import json
 import math
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -18,6 +19,7 @@ from panel_guide.legend import SHARED_LEGEND, STRICT_EXPERT_CONTRACT
 from panel_guide.manual import build_manual
 from panel_guide.protocol import Message, ProtocolError, operator_response_schema, parse_message
 from panel_guide.render import RENDER_VERSION, crop_current_room, render_maze
+from panel_guide.solver import distances_to_goal
 from panel_guide.tasks import MazeTask
 
 PROMPT_VERSIONS = ("v8", "v9")
@@ -245,7 +247,8 @@ class Recorder:
 
 class Conversation:
     def __init__(self, task: MazeTask, *, max_actions: int = 16, max_exchanges: int = 32,
-                 prompt_version: str = "v9", expert_instructions: str = "") -> None:
+                 prompt_version: str = "v9", expert_instructions: str = "",
+                 stop_when_lost: bool = False) -> None:
         if type(max_exchanges) is not int or max_exchanges <= 0:
             raise ValueError("max_exchanges must be a positive integer.")
         if prompt_version not in PROMPT_VERSIONS:
@@ -257,6 +260,9 @@ class Conversation:
         self.manual = build_manual(task)
         self.max_actions = max_actions
         self.max_exchanges = max_exchanges
+        # End an episode as soon as the solver proves the goal unreachable within the remaining
+        # actions and exchanges. The reward (0) is the same as playing on; it only saves calls.
+        self.stop_when_lost = stop_when_lost
         self.exchanges = 0
         self.history: list[dict] = []
         self.finished = False
@@ -343,6 +349,11 @@ class Conversation:
             self.recorder.finish(self.result)
         return self.result
 
+    def provably_lost(self) -> bool:
+        """Every remaining action needs its own exchange, so both budgets bound the route."""
+        remaining = min(self.game.remaining_actions, self.max_exchanges - self.exchanges)
+        return distances_to_goal(self.task).get(self.game.audit_state, remaining + 1) > remaining
+
     def interrupt(self, role: str, error: Exception) -> EpisodeResult:
         if not self._started or self.finished:
             raise RuntimeError("Only an active episode can be interrupted.")
@@ -425,8 +436,33 @@ class Conversation:
             self._feedback(**fields)
         if self.exchanges >= self.max_exchanges:
             return self._finish("failure", "exchange_limit")
+        if self.stop_when_lost and self.provably_lost():
+            return self._finish("failure", "provably_lost")
         self._processing = False
         return None
+
+    async def resume(self, prefix: Sequence[Sequence[str]], recorder: Recorder | None = None) -> Request:
+        """Start, replay recorded exchanges through the normal step path, return the next Expert request.
+
+        `prefix` holds (expert_text, operator_text, operator_stop_reason) per exchange. Maze state,
+        budgets, notes and history are rebuilt exactly; only the following exchanges need live agents.
+        """
+        class Replay:
+            def __init__(self, completion: Completion) -> None:
+                self.completion = completion
+
+            async def complete(self, request: Request) -> Completion:
+                return self.completion
+
+        request = self.start(recorder)
+        for number, (expert_text, operator_text, operator_stop) in enumerate(prefix, 1):
+            if self.recorder:
+                self.recorder.event(type="replayed_exchange", exchange=self.exchanges)
+            result = await self.step(Completion(expert_text), Replay(Completion(operator_text, operator_stop)))
+            if result is not None:
+                raise ValueError(f"The recorded prefix ends the episode at exchange {number}.")
+            request = self.next_expert_request()
+        return request
 
     async def run(self, expert: Agent, operator: Agent, recorder: Recorder | None = None,
                   *, timeout_seconds: float = 120) -> EpisodeResult:

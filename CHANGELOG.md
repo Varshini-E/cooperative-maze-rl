@@ -1,6 +1,6 @@
 # What changed, and what helped
 
-Updated November 9, 2026. Manually maintained experiment notes. Full traces and earlier plans are archived locally.
+Updated November 16, 2026. Manually maintained experiment notes. Full traces and earlier plans are archived locally.
 
 ## 1. Better communication
 
@@ -28,5 +28,10 @@ With thinking, SFT scored **15/24 versus initial 17/24**. There is no consistent
 - **Length bias:** failed episodes are longer, so token-summed loss weighted them **2.2–6.8×** more than successes. An overfit test selected per-episode normalization at LR 1e-4.
 - **Fitting, not generalizing:** a 4-task pilot improved **20/32 → 25/32**; on unseen tasks it scored **37 vs 36 of 48**, and a broader run **81 vs 82 of 120**.
 - **Bottleneck:** a scripted correct Expert with the real Operator solved **15/16**; the Expert's planning limits success.
+- **More optimization per batch:** three clipped PPO steps move success tokens ~9× more than one step, with ≤2% clipped.
+- **Restart points:** training from recorded mid-episode states focused groups on hard decisions; held-out **42 vs 41 of 85**.
+- **Systematic errors:** 95% of wrong choices repeat the same wrong door, and a manual hint gave only +4.9 points.
+- **Denser signal:** solver progress credit with 10 updates on 4 decisions raised correct first messages from **7.8% to 17.2%**. Fine-tuning on 273 solver-checked turns raised held-out first-move accuracy from **36.8% to 38.2%** (CI −4.4 to +7.8). Neither met its bar.
+- **Cheaper rollouts:** a provably lost episode now stops early (~19% fewer tokens), and the spending guard settles reservations to actual token cost (previously ~2×).
 
 See [RL status](docs/rl-status.md).

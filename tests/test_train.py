@@ -48,6 +48,37 @@ class PrepareUpdateTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             train.prepare_update([group], 'mean_token')
 
+    async def test_zero_progress_weight_matches_the_cookbook_episode_update(self):
+        from tinker_cookbook.rl.data_processing import assemble_training_data, compute_advantages
+        group = await self.group()
+        data, _, _ = train.prepare_update([group], 'per_episode')
+        scales = train.episode_scales(group, 'per_episode')
+        expected, _ = assemble_training_data([group], [[float(a) * s for a, s in zip(compute_advantages([group])[0], scales)]])
+        self.assertEqual([d.loss_fn_inputs['advantages'].to_torch().tolist() for d in data],
+                         [d.loss_fn_inputs['advantages'].to_torch().tolist() for d in expected])
+
+    async def test_progress_credit_trains_uniform_groups_on_moves_only(self):
+        toward = await do_single_rollout(Policy(MOVE), make_env(Agent(ACTION), exchanges=1))
+        away = await do_single_rollout(Policy(ASK, MOVE), make_env(Agent(REPLY, '{"type":"move","target":"door_1"}'), exchanges=2))
+        uniform = TrajectoryGroup([toward, toward], [0., 0.], [{}, {}])
+        self.assertEqual(train.prepare_update([uniform], 'per_episode')[0], [])
+        data, masks, totals = train.prepare_update([uniform], 'per_episode', progress_weight=.5)
+        self.assertEqual(len(data), 2)
+        for datum, mask in zip(data, masks):
+            self.assertEqual(datum.loss_fn_inputs['advantages'].to_torch().tolist(), [.5 * m for m in mask])
+        # Mixed group: the success's move gets A + w; the failure's question gets only its share of A
+        # and its move into the wrong room gets A - w, after per-episode scaling.
+        group = TrajectoryGroup([toward, away], [0., 0.], [{}, {}])
+        data, masks, totals = train.prepare_update([group], 'per_episode', progress_weight=.5)
+        s = train.episode_scales(group, 'per_episode')
+        firsts = [next(a for a, m in zip(d.loss_fn_inputs['advantages'].to_torch().tolist(), mask) if m)
+                  for d, mask in zip(data, masks)]
+        for value, expected in zip(firsts, (s[0] * 1., s[1] * -.5, s[1] * -1.), strict=True):
+            self.assertAlmostEqual(value, expected, places=6)
+        self.assertEqual(totals['progress_turns'], {'closer': 1, 'farther': 1, 'neutral': 1})
+        with self.assertRaises(ValueError):
+            train.prepare_update([group], 'per_episode', progress_weight=-1)
+
     async def test_alignment_check_counts_expert_tokens_only(self):
         group = await self.group()
         checked = train.verify_training_alignment(group.trajectories_G[0])

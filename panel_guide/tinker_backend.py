@@ -37,8 +37,10 @@ class ModelConfig:
 class SpendingGuard:
     """Conservative per-run estimate, not a provider-enforced billing limit.
 
-    Reserve uncached prompt cost plus the maximum output cost, with 20% headroom.
-    Keep reservations after failures and short outputs. Never credit uncertain calls.
+    Reserve uncached prompt cost plus the maximum output cost, with 20% headroom, before each call.
+    A call that returns settles to its exact prompt and output token counts (still with 20% headroom);
+    sampled Expert turns use ~1.5k of their 8k-token allowance, so unsettled reservations ran ~4x the
+    token cost. Failed, timed-out or cancelled calls keep their full reservation. Never credit uncertain calls.
     """
 
     def __init__(self, cap_usd: float, record: Callable[..., None] | None = None) -> None:
@@ -47,6 +49,7 @@ class SpendingGuard:
         self.cap_usd = cap_usd
         self.reserved_usd = 0.0
         self.reservations: list[dict] = []
+        self.settlements: list[dict] = []
         self.record = record
 
     def reserve(self, role: str, config: ModelConfig, prompt_tokens: int) -> float:
@@ -65,10 +68,27 @@ class SpendingGuard:
             self.record(type="cost_reservation", **event)
         return amount
 
+    def settle(self, role: str, config: ModelConfig, prompt_tokens: int, output_tokens: int, reserved: float) -> float:
+        """Release the unused output allowance of a completed call; return the amount released."""
+        if type(output_tokens) is not int or not 0 <= output_tokens <= config.max_tokens:
+            raise ValueError("A settled call needs its exact output length within max_tokens.")
+        cost = 1.2 * (prompt_tokens * config.input_usd_per_million
+                      + output_tokens * config.output_usd_per_million) / 1_000_000
+        released = max(0.0, reserved - cost)
+        self.reserved_usd -= released
+        event = {"role": role, "model": config.model, "prompt_tokens": prompt_tokens,
+                 "output_tokens": output_tokens, "released_usd": released,
+                 "total_reserved_usd": self.reserved_usd}
+        self.settlements.append(event)
+        if self.record:
+            self.record(type="cost_settlement", **event)
+        return released
+
     def to_dict(self) -> dict:
         return {"cap_usd": self.cap_usd, "reserved_usd": self.reserved_usd,
                 "note": "Conservative estimate, not an invoice or provider spending limit.",
-                "reservations": self.reservations}
+                "released_usd": sum(e["released_usd"] for e in self.settlements),
+                "reservations": self.reservations, "settlements": self.settlements}
 
     def reserve_training(self, model: str, tokens: int, usd_per_million: float, *, operation: str) -> float:
         """Training-client forward passes bill all input tokens, including context."""
@@ -166,6 +186,7 @@ class TinkerAgent:
             sampling_params=params,
         )
         sequence = result.sequences[0]
+        released = self.budget.settle(role, config, prompt_length, len(sequence.tokens), reservation)
         # Preserve original sampled tokens, including any private reasoning, for audit.
         # These records do not yet constitute a verified RL training batch.
         metadata = {
@@ -173,7 +194,7 @@ class TinkerAgent:
             "config": asdict(config), "input_tokens": prompt_length,
             "output_tokens": len(sequence.tokens), "token_ids": list(sequence.tokens),
             "logprobs": None if sequence.logprobs is None else list(sequence.logprobs),
-            "reserved_usd": reservation,
+            "reserved_usd": reservation, "released_usd": released,
             "provider_request": str(capture_path) if capture_path else None,
             "raw_text": self.decode_tokens(sequence.tokens) if self.decode_tokens else None,
         }

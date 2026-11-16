@@ -49,6 +49,7 @@ async def run(args: argparse.Namespace) -> int:
     conversation = Conversation(task, max_actions=max_actions,
                                 max_exchanges=min(config["max_exchanges"], level.max_exchanges),
                                 prompt_version=config["prompt_version"],
+                                stop_when_lost=config.get("stop_when_lost", False),
                                 expert_instructions=COMMAND_CONTRACT if diagnostic else "")
     budget = None
     service = None

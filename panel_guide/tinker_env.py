@@ -21,9 +21,23 @@ from tinker_cookbook.rl.types import Action, ActionExtra, Env, EnvGroupBuilder, 
 
 from panel_guide.conversation import Agent, Completion, Conversation, Recorder, Request
 from panel_guide.curriculum import task_id
+from panel_guide.solver import distances_to_goal
+from panel_guide.tasks import State
 from panel_guide.tinker_backend import TinkerAgent, model_messages, public_text
 
 ENV_VERSIONS = {"v8": "maze-tinker-env-v3-strict", "v9": "maze-tinker-env-v4-notes"}
+
+
+def progress(task, before: State, after: State) -> int:
+    """Solver-verified credit for one exchange: +1 closer to the goal, -1 farther (or into a dead
+    end), 0 for no physical change, a blocked move or a step that keeps the distance.
+
+    Training-side metric only; the environment reward stays sparse and agents never see it.
+    """
+    distance = distances_to_goal(task)
+    if before not in distance:
+        return 0
+    return max(-1, min(1, distance[before] - distance.get(after, distance[before] + 1)))
 
 
 class RolloutInterrupted(RuntimeError):
@@ -33,7 +47,8 @@ class RolloutInterrupted(RuntimeError):
 class MazeEnv(Env):
     def __init__(self, conversation: Conversation, operator: Agent, renderer: Renderer, *,
                  recorder: Recorder | None = None, max_tokens: int = 512,
-                 context_tokens: int = 32768, timeout_seconds: float = 120) -> None:
+                 context_tokens: int = 32768, timeout_seconds: float = 120,
+                 prefix: Sequence[Sequence[str]] = ()) -> None:
         if any(type(n) is not int or n <= 0 for n in (max_tokens, context_tokens)):
             raise ValueError("Token limits must be positive integers.")
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
@@ -42,6 +57,8 @@ class MazeEnv(Env):
         self.recorder = recorder
         self.max_tokens, self.context_tokens, self.timeout_seconds = max_tokens, context_tokens, timeout_seconds
         self.example_id = task_id(conversation.task)
+        # Recorded exchanges to replay before the first sampled Expert turn (a mid-episode start).
+        self.prefix = tuple(tuple(p) for p in prefix)
         self.request: Request | None = None
 
     def _observation(self, request: Request) -> tinker.ModelInput:
@@ -55,7 +72,11 @@ class MazeEnv(Env):
         return observation
 
     async def initial_observation(self) -> tuple[tinker.ModelInput, StopCondition]:
-        observation = self._observation(self.conversation.start(self.recorder))
+        if self.prefix:
+            request = await self.conversation.resume(self.prefix, self.recorder)
+        else:
+            request = self.conversation.start(self.recorder)
+        observation = self._observation(request)
         return observation, self.renderer.get_stop_sequences()
 
     async def step(self, action: Action, *, extra: ActionExtra | None = None) -> StepResult:
@@ -72,19 +93,20 @@ class MazeEnv(Env):
                 reason = "invalid_termination"
         except ValueError:
             text, reason = "", "invalid_termination"
-        before = self.conversation.game.remaining_actions
+        before, state = self.conversation.game.remaining_actions, self.conversation.game.audit_state
         completion = Completion(text, reason, {"token_ids": list(action), "raw_text": raw})
         result = await self.conversation.step(completion, self.operator, timeout_seconds=self.timeout_seconds)
         if result is not None and result.status == "interrupted":
             raise RolloutInterrupted(result.reason)
         metrics = {"exchanges": 1, "physical_actions": before - self.conversation.game.remaining_actions,
-                   "protocol_error": int("error" in self.conversation.history[-1])}
+                   "protocol_error": int("error" in self.conversation.history[-1]),
+                   "progress": progress(self.conversation.task, state, self.conversation.game.audit_state)}
         if result is None:
             observation = self._observation(self.conversation.next_expert_request())
         else:
             observation = tinker.ModelInput.empty()
             stop = {"goal_reached": "completed", "action_limit": "max_tool_calls", "exchange_limit": "max_turns",
-                    "protocol_failure": "protocol_failure"}[result.reason]
+                    "protocol_failure": "protocol_failure", "provably_lost": "provably_lost"}[result.reason]
             metrics.update({"success": int(result.status == "success"), f"stop/{stop}": 1})
         return StepResult(reward=result.reward if result else 0.0, episode_done=result is not None,
                           next_observation=observation, next_stop_condition=self.renderer.get_stop_sequences(),
@@ -118,7 +140,7 @@ class MazeGroupBuilder(EnvGroupBuilder):
                     or conversation.game.remaining_actions != conversation.max_actions):
                 raise ValueError("Group members must be fresh, unstarted episodes.")
             settings.add((conversation.prompt_version, conversation.max_actions, conversation.max_exchanges, conversation.expert_instructions,
-                          env.max_tokens, env.context_tokens, env.timeout_seconds))
+                          conversation.stop_when_lost, env.max_tokens, env.context_tokens, env.timeout_seconds, env.prefix))
         if len(settings) != 1:
             raise ValueError("All attempts in a group must use the same prompts and budgets.")
         return envs

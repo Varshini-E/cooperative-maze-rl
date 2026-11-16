@@ -56,6 +56,17 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(len(guard.reservations), 2)
 
 
+    def test_completed_calls_settle_to_their_exact_tokens(self):
+        guard = SpendingGuard(1)
+        reserved = guard.reserve("expert", CONFIG, 100)
+        released = guard.settle("expert", CONFIG, 100, 12, reserved)
+        self.assertAlmostEqual(guard.reserved_usd, 1.2 * (100 * 0.195 + 12 * 0.60) / 1_000_000)
+        self.assertAlmostEqual(released, reserved - guard.reserved_usd)
+        self.assertEqual(guard.to_dict()["released_usd"], released)
+        with self.assertRaises(ValueError):
+            guard.settle("expert", CONFIG, 100, 513, reserved)
+
+
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_sampler_payload_and_raw_output_are_captured_separately(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -73,6 +84,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_adapter_preserves_tokens_but_does_not_forward_thinking(self):
         renderer, sampler, budget = FakeRenderer(), FakeSampler(), SpendingGuard(1)
         agent = TinkerAgent(CONFIG, renderer, sampler, budget, lambda **kwargs: kwargs)
+        self.addCleanup(lambda: self.assertAlmostEqual(  # settled to 100 prompt + 3 output tokens
+            budget.reserved_usd, 1.2 * (100 * 0.195 + 3 * 0.60) / 1_000_000))
         request = Conversation(example_task())._request("expert")
         completion = await agent.complete(request)
         self.assertNotIn("private reasoning", completion.text)

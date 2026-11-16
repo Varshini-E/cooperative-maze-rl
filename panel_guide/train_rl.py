@@ -1,17 +1,25 @@
 """Train the Expert with a simplified GRPO-style loop on Tinker.
 
 Each batch picks `tasks_per_batch` training tasks, runs `group_size` independent episodes on each,
-applies one importance-sampling update from group-centred advantages and reloads the sampler with
-the new weights. No PPO clipping or reference KL. Settings: `[training]` in configs/maze.toml.
+applies `steps_per_batch` optimizer steps from group-centred advantages (one importance-sampling
+step by default; several need the clipped `ppo` loss) and reloads the sampler with the new weights.
+No reference KL. Settings: `[training]` in configs/maze.toml. Two options make each dollar go further:
+`progress_weight > 0` adds solver-verified per-turn progress credit (so groups with one shared
+outcome still train), and top-level `stop_when_lost = true` ends episodes the solver proves lost.
 
     python -m panel_guide.train_rl --bank data/mazes-v2 --check            # free: plan and rough cost
     python -m panel_guide.train_rl --bank data/mazes-v2 --budget-usd 40    # paid
+    python -m panel_guide.train_rl --decisions starts.jsonl --check        # restart from recorded prefixes
+
+A decisions file holds mid-episode starts: one JSON row per start with a bank task row's fields plus
+`prefix`, the recorded (expert_text, operator_text, operator_stop_reason) exchanges to replay first.
+Only the exchanges after the prefix are sampled, so groups concentrate on the chosen decision points.
 """
 
 import argparse
 import asyncio
+import hashlib
 import json
-import math
 import os
 import tomllib
 from datetime import datetime, timezone
@@ -24,8 +32,9 @@ from panel_guide.maze_bank import load_bank
 from panel_guide.task_sampler import TaskSampler
 from panel_guide.tasks import task_from_dict
 
-# Rough planning numbers from past runs (thinking on): sampling dominates the cost.
-USD_PER_EPISODE, USD_PER_UPDATE = 0.13, 1.0
+# Rough planning numbers from the restart-point run (thinking on), with settled call reservations:
+# sampling per episode, and forward-backward per episode per optimizer step (~70k billed tokens).
+USD_PER_EPISODE, USD_PER_EPISODE_STEP = 0.06, 0.04
 
 
 def training_pool(records, split="train", routes=(5, 10)):
@@ -39,9 +48,15 @@ def training_pool(records, split="train", routes=(5, 10)):
 
 def plan_summary(pool, settings, batches):
     episodes = batches * settings["tasks_per_batch"] * settings["group_size"]
+    steps = settings.get("steps_per_batch", 1)
     return {"pool_tasks": len(pool), "pool_mazes": len({r["maze_id"] for r in pool}),
             "batches": batches, "episodes": episodes,
-            "rough_cost_usd": round(episodes * USD_PER_EPISODE + batches * USD_PER_UPDATE, 2)}
+            "rough_cost_usd": round(episodes * (USD_PER_EPISODE + steps * USD_PER_EPISODE_STEP), 2)}
+
+
+def slug(task_id):
+    """Folder name for a task ID; restart IDs contain paths."""
+    return task_id if task_id.replace("-", "").isalnum() else hashlib.sha256(task_id.encode()).hexdigest()[:16]
 
 
 def is_budget_stop(error):
@@ -53,7 +68,7 @@ def is_budget_stop(error):
 
 
 async def collect_group(row, prompt_version, policy, operator, renderer, output, *, group_size,
-                        max_tokens, context_tokens, timeout_seconds):
+                        max_tokens, context_tokens, timeout_seconds, stop_when_lost=False):
     """Run one group; return (TrajectoryGroup or None if any episode was interrupted, errors)."""
     from tinker_cookbook.rl.rollouts import do_single_rollout
     from tinker_cookbook.rl.types import TrajectoryGroup
@@ -65,9 +80,10 @@ async def collect_group(row, prompt_version, policy, operator, renderer, output,
 
     def make_env():
         conversation = Conversation(task, max_actions=row["max_actions"], max_exchanges=row["max_exchanges"],
-                                    prompt_version=prompt_version)
+                                    prompt_version=prompt_version, stop_when_lost=stop_when_lost)
         return MazeEnv(conversation, operator, renderer, recorder=Recorder(output / f"attempt-{next(attempt):02d}"),
-                       max_tokens=max_tokens, context_tokens=context_tokens, timeout_seconds=timeout_seconds)
+                       max_tokens=max_tokens, context_tokens=context_tokens, timeout_seconds=timeout_seconds,
+                       prefix=row.get("prefix", ()))
 
     envs = await MazeGroupBuilder(make_env, group_size).make_envs()
     results = await asyncio.gather(*(do_single_rollout(policy, env) for env in envs), return_exceptions=True)
@@ -79,33 +95,28 @@ async def collect_group(row, prompt_version, policy, operator, renderer, output,
     return TrajectoryGroup(list(results), [0.] * group_size, [{} for _ in results]), []
 
 
-async def update_policy(client, service, expert, guard, data, settings, name):
-    """One importance-sampling backward pass and optimizer step, then sample from the new weights."""
-    import tinker
-
+async def update_policy(client, service, expert, guard, data, masks, settings, name):
+    """`steps_per_batch` optimizer steps on the batch, then sample from the new weights."""
     from panel_guide import train
 
-    tokens = sum(d.model_input.length for d in data)
+    tokens = sum(d.model_input.length for d in data) * settings.get("steps_per_batch", 1)
     guard.reserve_training(expert.config.model, tokens, settings["train_usd_per_million"], operation="forward_backward")
-    backward = await (await client.forward_backward_async(data, loss_fn=settings["loss_fn"])).result_async()
-    if any(isinstance(v, (int, float)) and not math.isfinite(v) for v in backward.metrics.values()):
-        raise ValueError("Nonfinite backward metric; no optimizer step.")
-    step = await (await client.optim_step_async(tinker.AdamParams(
-        learning_rate=settings["learning_rate"], beta1=.9, beta2=.95, eps=1e-8,
-        grad_clip_norm=settings["grad_clip_norm"]))).result_async()
+    history = await train.optimize(client, data, masks, settings)
     checkpoint = await train.save_checkpoint(client, name, settings["checkpoint_ttl_seconds"])
     await train.attach_sampler(service, expert, checkpoint)
-    return checkpoint, {**backward.metrics, **step.metrics}
+    return checkpoint, history
 
 
 def batch_record(number, rows, results, totals, guard):
     groups = [g for _, g, _ in results if g is not None]
     rewards = [r for g in groups for r in g.get_total_rewards()]
-    invalid = sum("stop/protocol_failure" in t.transitions[-1].metrics
-                  for g in groups for t in g.trajectories_G if t.transitions)
+    ends = [t.transitions[-1].metrics for g in groups for t in g.trajectories_G if t.transitions]
     return {"batch": number, "tasks": [r["task_id"] for r in rows], "groups": len(groups),
             "dropped_groups": len(rows) - len(groups), "mixed_groups": totals["mixed_groups"],
-            "episodes": len(rewards), "successes": int(sum(rewards)), "protocol_failures": invalid,
+            "episodes": len(rewards), "successes": int(sum(rewards)),
+            "protocol_failures": sum("stop/protocol_failure" in m for m in ends),
+            "provably_lost": sum("stop/provably_lost" in m for m in ends),
+            "progress_turns": totals.get("progress_turns"), "training_datums": totals.get("training_datums", 0),
             "expert_target_tokens": totals["expert_target_tokens"], "reserved_usd": round(guard.reserved_usd, 4)}
 
 
@@ -113,8 +124,14 @@ async def run(args):
     load_dotenv(dotenv_path=Path(".env"), override=False, interpolate=False)
     config = tomllib.loads(args.config.read_text())
     settings = config["training"]
-    _, records = load_bank(args.bank)
-    pool = training_pool(records, args.split, (args.min_route, args.max_route))
+    if (args.bank is None) == (args.decisions is None):
+        raise ValueError("Pass exactly one of --bank or --decisions.")
+    if args.decisions:
+        records = [json.loads(line) for line in args.decisions.read_text().splitlines() if line.strip()]
+        pool = training_pool(records, args.split, (1, args.max_route))  # remaining distance at the start
+    else:
+        _, records = load_bank(args.bank)
+        pool = training_pool(records, args.split, (args.min_route, args.max_route))
     plan = plan_summary(pool, settings, args.batches)
     if args.check:
         print(json.dumps({**plan, "tinker_api_key_present": bool(os.environ.get("TINKER_API_KEY")),
@@ -132,7 +149,7 @@ async def run(args):
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output = args.output_dir or Path("outputs") / f"train-rl-{stamp}"
     events = Recorder(output)
-    train.write_json(output / "run.json", {"config": config, "plan": plan, "bank": str(args.bank),
+    train.write_json(output / "run.json", {"config": config, "plan": plan, "bank": str(args.bank or args.decisions),
         "split": args.split, "routes": [args.min_route, args.max_route], "seed": args.seed,
         "resume": args.resume, "budget_usd": args.budget_usd})
     guard = SpendingGuard(args.budget_usd, record=events.event)
@@ -154,10 +171,18 @@ async def run(args):
         limit = asyncio.Semaphore(args.parallel_groups)
 
         async def group(row, folder):
+            # Rerun an infrastructure-interrupted group once from scratch; never after a budget stop.
             async with limit:
-                return (row, *await collect_group(row, config["prompt_version"], policy, operator, expert.renderer,
-                    folder / row["task_id"], group_size=settings["group_size"], max_tokens=expert.config.max_tokens,
-                    context_tokens=expert.config.context_tokens, timeout_seconds=config["timeout_seconds"]))
+                for attempt in ("", "-retry"):
+                    result, errors = await collect_group(row, config["prompt_version"], policy, operator,
+                        expert.renderer, folder / (slug(row["task_id"]) + attempt), group_size=settings["group_size"],
+                        max_tokens=expert.config.max_tokens, context_tokens=expert.config.context_tokens,
+                        timeout_seconds=config["timeout_seconds"], stop_when_lost=config.get("stop_when_lost", False))
+                    if result is not None or any(is_budget_stop(e) for e in errors):
+                        break
+                    events.event(type="group_retry", task_id=row["task_id"],
+                                 errors=sorted({type(e).__name__ for e in errors}))
+                return row, result, errors
 
         for number in range(1, args.batches + 1):
             rows = sampler.sample(settings["tasks_per_batch"])
@@ -168,18 +193,21 @@ async def run(args):
                                  errors=sorted({type(e).__name__ for e in errors}))
                 else:
                     sampler.observe(row["task_id"], [int(r) for r in result.get_total_rewards()])
-            data, _, totals = train.prepare_update([g for _, g, _ in results if g is not None],
-                                                   settings["normalization"])
+            data, masks, totals = train.prepare_update([g for _, g, _ in results if g is not None],
+                                                   settings["normalization"], settings.get("progress_weight", 0.0))
             record = batch_record(number, rows, results, totals, guard)
             if any(is_budget_stop(e) for _, _, errors in results for e in errors):
                 status = "budget_stopped"
             elif record["episodes"] and record["protocol_failures"] / record["episodes"] > settings["stop_invalid_rate"]:
                 status = "format_stopped"  # the failure mode of the token-summed loss at high LR
             elif data:
-                checkpoint, metrics = await update_policy(client, service, expert, guard, data, settings,
-                                                          f"step-{number:03d}")
-                sampler.advance()
-                record.update(checkpoint=checkpoint, update_metrics=metrics)
+                try:
+                    checkpoint, metrics = await update_policy(client, service, expert, guard, data, masks, settings,
+                                                              f"step-{number:03d}")
+                    sampler.advance()
+                    record.update(checkpoint=checkpoint, update_metrics=metrics)
+                except BudgetExceeded:
+                    status = "budget_stopped"  # reserved before any training call; the last checkpoint stands
             events.event(type="batch", **record)
             print(f"batch {number}: {record['successes']}/{record['episodes']} solved, "
                   f"{record['mixed_groups']} mixed groups, ${guard.reserved_usd:.2f} reserved", flush=True)
@@ -197,7 +225,8 @@ async def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--bank", type=Path, required=True, help="Maze bank from panel_guide.generate_mazes.")
+    parser.add_argument("--bank", type=Path, help="Maze bank from panel_guide.generate_mazes.")
+    parser.add_argument("--decisions", type=Path, help="JSONL of mid-episode starts (see above).")
     parser.add_argument("--split", default="train")
     parser.add_argument("--min-route", type=int, default=5)
     parser.add_argument("--max-route", type=int, default=10)

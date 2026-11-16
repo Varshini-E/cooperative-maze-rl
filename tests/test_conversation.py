@@ -125,6 +125,51 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         result = await Conversation(example_task()).run(QueueAgent(INSTRUCT), SlowOperator(), timeout_seconds=0.01)
         self.assertEqual((result.reason, result.actions), ("infrastructure_error", 0))
 
+    async def test_resume_reproduces_the_live_request_state_and_budgets(self):
+        class Tape:
+            def __init__(self, agent):
+                self.agent, self.requests, self.completions = agent, [], []
+
+            async def complete(self, request):
+                completion = await self.agent.complete(request)
+                self.requests.append(request)
+                self.completions.append(completion)
+                return completion
+
+        expert, operator = Tape(ScriptedExpert()), Tape(ScriptedOperator())
+        live = Conversation(example_task(), max_actions=9, max_exchanges=18, prompt_version="v9")
+        await live.run(expert, operator)
+        prefix = [(e.text, o.text, o.stop_reason) for e, o in zip(expert.completions, operator.completions)]
+        for k in (1, 6, 11):
+            with self.subTest(k=k):
+                resumed = Conversation(example_task(), max_actions=9, max_exchanges=18, prompt_version="v9")
+                request = await resumed.resume(prefix[:k])
+                original = expert.requests[k]
+                self.assertEqual(request.text_messages(), original.text_messages())
+                self.assertEqual((request.remaining_actions, request.remaining_exchanges),
+                                 (original.remaining_actions, original.remaining_exchanges))
+                self.assertEqual(resumed.exchanges, k + 1)
+        with self.assertRaises(ValueError):
+            await Conversation(example_task(), max_actions=9, max_exchanges=18).resume(prefix)
+
+    async def test_provably_lost_episode_stops_early_with_the_same_reward(self):
+        # The fixture needs all 9 actions, so one wasted action makes the goal unreachable.
+        waste = '{"type":"move","target":"door_99"}'
+        for stop, expected in ((True, ("provably_lost", 1, 1)), (False, ("action_limit", 9, 9))):
+            with self.subTest(stop_when_lost=stop):
+                conversation = Conversation(example_task(), max_actions=9, max_exchanges=18, stop_when_lost=stop)
+                result = await conversation.run(QueueAgent(*[INSTRUCT] * 9), QueueAgent(*[waste] * 9))
+                self.assertEqual((result.reason, result.actions, result.exchanges), expected)
+                self.assertEqual((result.status, result.reward), ("failure", 0))
+        # Each action needs its own exchange: a question that leaves fewer exchanges than actions needed.
+        result = await Conversation(example_task(), max_actions=9, max_exchanges=9, stop_when_lost=True).run(
+            QueueAgent(ASK), QueueAgent('{"type":"reply","text":"crescent"}'))
+        self.assertEqual((result.reason, result.exchanges), ("provably_lost", 1))
+        # A winnable episode is never stopped: the scripted pair still needs all 9 actions.
+        result = await Conversation(example_task(), max_actions=9, max_exchanges=18, stop_when_lost=True).run(
+            ScriptedExpert(), ScriptedOperator())
+        self.assertEqual((result.status, result.actions), ("success", 9))
+
     async def test_real_operator_request_contains_only_one_current_image(self):
         expert = QueueAgent(INSTRUCT, ASK)
         operator = QueueAgent(MOVE, '{"type":"reply","text":"anvil"}')

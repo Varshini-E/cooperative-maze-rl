@@ -1,7 +1,7 @@
-"""Expert RL update helpers: group-centred advantages, one importance-sampling step per batch.
+"""Expert RL update helpers: group-centred advantages (plus optional per-turn progress credit).
 
 Only Expert action tokens carry advantages; the manual, Operator replies and feedback are context.
-There is no PPO clipping or reference KL.
+One importance-sampling step per batch by default; `optimize` runs several clipped `ppo` steps. No reference KL.
 """
 
 import json
@@ -9,7 +9,7 @@ import math
 
 import tinker
 from tinker.lib.retry_handler import RetryConfig
-from tinker_cookbook.rl.data_processing import assemble_training_data, compute_advantages, trajectory_to_data
+from tinker_cookbook.rl.data_processing import compute_advantages, trajectory_to_data
 
 
 def write_json(path, value):
@@ -67,8 +67,48 @@ def episode_scales(group, normalization):
     return [mean / n if normalization == 'per_episode' else 1. for n in lengths]
 
 
-def prepare_update(groups, normalization):
-    """Keep all outcomes on disk; omit only zero-advantage groups from compute."""
+def turn_advantages(groups, normalization, progress_weight):
+    """Per-group, per-episode, per-Expert-turn advantages.
+
+    a[i][t] = scale_i * (A_i + progress_weight * progress_it), where A_i is the group-centred goal
+    reward, scale_i the episode normalization and progress_it the Env's solver-verified progress
+    metric for that turn (+1 closer, -1 farther, 0 otherwise). The progress term needs no baseline:
+    its sign is correct in every state, so groups with one shared outcome still carry signal.
+    """
+    result = []
+    for group, group_advantages in zip(groups, compute_advantages(groups)):
+        scales = episode_scales(group, normalization)
+        result.append([[scale * (float(a) + progress_weight * t.metrics.get('progress', 0))
+                        for t in trajectory.transitions]
+                       for trajectory, a, scale in zip(group.trajectories_G, group_advantages, scales)])
+    return result
+
+
+def assemble_turn_data(groups, advantages):
+    """One datum per rebuilt Expert prompt with its own advantage; all-zero datums are dropped
+    (they add no gradient, only forward-backward cost)."""
+    data, provenance = [], []
+    for g, (group, group_advantages) in enumerate(zip(groups, advantages)):
+        for i, (trajectory, turns) in enumerate(zip(group.trajectories_G, group_advantages)):
+            datums = trajectory_to_data(trajectory, 1.0)  # advantages == mask; checked by verify_training_alignment
+            for t, (datum, value) in enumerate(zip(datums, turns, strict=True)):
+                if value == 0:
+                    continue
+                mask = datum.loss_fn_inputs['mask'].to_torch()
+                datum.loss_fn_inputs['advantages'] = tinker.TensorData.from_torch(mask * value)
+                data.append(datum)
+                provenance.append({'group_idx': g, 'traj_idx': i, 'turn_idx': t})
+    return data, provenance
+
+
+def prepare_update(groups, normalization, progress_weight=0.0):
+    """Keep all outcomes on disk; omit only zero-advantage groups (and turns) from compute.
+
+    progress_weight = 0 is the sparse-reward update used by every run so far: only groups with
+    mixed outcomes train. A positive weight adds per-turn solver progress credit (turn_advantages).
+    """
+    if not math.isfinite(progress_weight) or progress_weight < 0:
+        raise ValueError('progress_weight must be finite and nonnegative.')
     totals = {'episodes': 0, 'datums': 0, 'expert_target_tokens': 0, 'masked_context_positions': 0}
     for group in groups:
         for trajectory in group.trajectories_G:
@@ -78,12 +118,19 @@ def prepare_update(groups, normalization):
                 totals[key] += value
     informative = [g for g in groups if len(set(g.get_total_rewards())) > 1]
     totals['mixed_groups'] = len(informative)
-    if not informative:
+    if progress_weight:
+        progress = [t.metrics.get('progress', 0) for g in groups for tr in g.trajectories_G for t in tr.transitions]
+        totals.update(progress_weight=progress_weight, progress_turns={
+            'closer': progress.count(1), 'farther': progress.count(-1), 'neutral': progress.count(0)})
+        trained = groups
+    else:
+        trained = informative
+    if not trained:
         return [], [], totals
-    advantages = [[float(a) * scale for a, scale in zip(group_advantages, episode_scales(group, normalization))]
-                  for group, group_advantages in zip(informative, compute_advantages(informative))]
     totals['normalization'] = normalization
-    data, provenance = assemble_training_data(informative, advantages)
+    data, provenance = assemble_turn_data(trained, turn_advantages(trained, normalization, progress_weight))
+    if not data:
+        return [], [], totals
     masks = [d.loss_fn_inputs['mask'].to_torch().tolist() for d in data]
     for datum, mask in zip(data, masks):
         advantages = datum.loss_fn_inputs['advantages'].to_torch().tolist()
@@ -105,6 +152,54 @@ def action_logprobs(result, index, mask):
     if not selected or not all(math.isfinite(v) for v in selected):
         raise ValueError('Nonfinite or missing training log probabilities.')
     return selected
+
+
+def log_ratios(data, masks, result):
+    """Current (training) minus sampling log-probabilities on Expert action tokens."""
+    values = []
+    for index, (datum, mask) in enumerate(zip(data, masks, strict=True)):
+        sampled = [v for v, m in zip(datum.loss_fn_inputs['logprobs'].to_torch().tolist(), mask) if m]
+        values += [c - s for c, s in zip(action_logprobs(result, index, mask), sampled, strict=True)]
+    return values
+
+
+def ratio_stats(values, clip=None):
+    stats = {'mean_abs_log_ratio': sum(map(abs, values)) / len(values),
+             'mean_log_ratio': sum(values) / len(values)}
+    if clip:
+        low, high = clip
+        stats['clip_fraction'] = sum(not low <= math.exp(v) <= high for v in values) / len(values)
+    return stats
+
+
+LOSSES = ('importance_sampling', 'ppo')
+
+
+async def optimize(client, data, masks, settings):
+    """`steps_per_batch` forward-backward + Adam steps on one sampled batch.
+
+    Every step compares against the *sampling* log-probabilities, so after the first step the batch
+    is off-policy; more than one step therefore requires the clipped `ppo` loss. Each step's stats
+    describe the policy before that step (step 1: sampler/trainer mismatch only).
+    """
+    steps, loss_fn = settings.get('steps_per_batch', 1), settings['loss_fn']
+    if loss_fn not in LOSSES or type(steps) is not int or steps < 1:
+        raise ValueError(f'loss_fn must be one of {LOSSES} and steps_per_batch a positive integer.')
+    if steps > 1 and loss_fn != 'ppo':
+        raise ValueError("Several steps per batch reuse off-policy samples; use loss_fn = 'ppo'.")
+    clip = tuple(settings['ppo_clip']) if loss_fn == 'ppo' else None
+    config = {'clip_low_threshold': clip[0], 'clip_high_threshold': clip[1]} if clip else None
+    adam = tinker.AdamParams(learning_rate=settings['learning_rate'], beta1=.9, beta2=.95, eps=1e-8,
+                             grad_clip_norm=settings['grad_clip_norm'])
+    history = []
+    for step in range(1, steps + 1):
+        backward = await (await client.forward_backward_async(data, loss_fn=loss_fn, loss_fn_config=config)).result_async()
+        if any(isinstance(v, (int, float)) and not math.isfinite(v) for v in backward.metrics.values()):
+            raise ValueError('Nonfinite backward metric; no optimizer step.')
+        optimizer = await (await client.optim_step_async(adam)).result_async()
+        history.append({'step': step, **backward.metrics, **optimizer.metrics,
+                        **ratio_stats(log_ratios(data, masks, backward), clip)})
+    return history
 
 
 async def save_checkpoint(client, name, ttl):

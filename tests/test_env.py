@@ -13,7 +13,7 @@ try:
     from tinker_cookbook.rl.data_processing import assemble_training_data, compute_advantages
     from tinker_cookbook.rl.rollouts import do_single_rollout
     from tinker_cookbook.rl.types import Env, TrajectoryGroup
-    from panel_guide.tinker_env import ExpertTokenPolicy, MazeEnv, MazeGroupBuilder, RolloutInterrupted
+    from panel_guide.tinker_env import ExpertTokenPolicy, MazeEnv, MazeGroupBuilder, RolloutInterrupted, progress
     HAS_COOKBOOK = True
 except ImportError:
     HAS_COOKBOOK = False
@@ -118,12 +118,25 @@ class NativeEnvTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((a.text_messages(), a.image_png, a.detail_png), (b.text_messages(), b.image_png, b.detail_png))
             self.assertEqual(len(b.history), (1, 4)[index])
         self.assertEqual([t.reward for t in trajectory.transitions], [0, 1])
+        self.assertEqual([t.metrics['progress'] for t in trajectory.transitions], [0, 1])
         self.assertEqual(trajectory.stop_reason, "completed")
         self.assertTrue(trajectory.transitions[-1].episode_done)
         with self.assertRaises(RuntimeError):
             await env.initial_observation()
         with self.assertRaises(RuntimeError):
             await env.step(list(MOVE.encode()) + [0])
+
+    async def test_progress_metric_signs_and_provably_lost_stop(self):
+        task = development_task("one-door")
+        away = await do_single_rollout(Policy(MOVE), make_env(Agent('{"type":"move","target":"door_1"}'), exchanges=1))
+        self.assertEqual(away.transitions[0].metrics['progress'], -1)
+        self.assertEqual(progress(task, task.initial, task.initial), 0)
+        # one-switch needs 3 actions; after two questions only 2 exchanges remain.
+        conversation = Conversation(development_task("one-switch"), max_exchanges=4, max_actions=4, stop_when_lost=True)
+        trajectory = await do_single_rollout(Policy(ASK, ASK), MazeEnv(conversation, Agent(REPLY, REPLY), Renderer()))
+        self.assertEqual(len(trajectory.transitions), 2)
+        self.assertEqual(trajectory.transitions[-1].metrics['stop/provably_lost'], 1)
+        self.assertEqual(trajectory.transitions[-1].reward, 0)
 
     async def test_real_cookbook_datum_alignment_masks_and_group_advantages(self):
         success = await do_single_rollout(Policy(ASK, MOVE), make_env(Agent(REPLY, ACTION)))
